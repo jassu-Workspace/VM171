@@ -13,6 +13,15 @@ import { validateImagePayload } from './imageSafety';
 import { originGuard, parseAllowedOrigins } from './originGuard';
 import { bodyLimit } from 'hono/body-limit';
 import { StepSchema } from './schemas';
+// Cycle 2.10: the multi-component address heuristic lives with the extension
+// because that is where the element context it reasons about is collected.
+// Imported rather than duplicated ON PURPOSE: a second copy of a security
+// heuristic is precisely how the test mirror drifted out of sync with
+// production (finding N8), and address parsing is far too subtle to reimplement.
+// `containsFullAddress` and its dependency `analyzeAddressText` are pure — the
+// `window` references in that module belong to sibling functions that walk
+// elements, not to this code path.
+import { containsFullAddress } from '../../extension/src/utils/addressDetector';
 import { getConnInfo } from '@hono/node-server/conninfo';
 import {
   evaluateRedactionPolicy,
@@ -441,6 +450,28 @@ const FIREWALL_PATTERNS: Record<string, RegExp> = {
   UPI_ID: /\b[a-zA-Z0-9.\-_]{2,256}@(okhdfcbank|okaxis|oksbi|paytm|upi|ybl|apl|axl|ibl|idfcbank)\b/i,
   HEALTH_ID: /\b\d{2}-\d{4}-\d{4}-\d{4}\b/,
   TAX_ID: /\b\d{2}[A-Z]{5}\d{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}\b/,
+
+  // ── Cycle 2.10 ──────────────────────────────────────────────────────────
+  // The server firewall covered 12 classes while the client-side verifier
+  // (leakVerifier.VERIFICATION_PII_PATTERNS) covered 25. The server is the
+  // SECOND line of defence — it is what catches a payload that arrives
+  // un-redacted because the client was compromised, buggy, or operating in a
+  // degraded mode. A second line that misses 11 PII classes is not a second
+  // line. The 13 added below close that gap; the set is now deliberately the
+  // same taxonomy the client uses, so the two layers cannot drift apart again
+  // the way the test mirror did (finding N8).
+  SWIFT_BIC: /\b[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?\b|\b[A-Z]{2}\d{2}[A-Z0-9]{12,30}\b/,
+  CRYPTO_WALLET: /\b(?:0x[a-fA-F0-9]{40}|(?:1|3|bc1)[a-zA-HJ-NP-Z0-9]{25,39})\b/,
+  PASSPORT: /\b[A-Z][1-9]\d{6}\b|\b[A-Z]\d{7}\b/,
+  DRIVING_LICENSE: /\b[A-Z]{2}[0-9]{2}[ -]?[0-9]{11}\b/,
+  PERSON: /\b(?:Mr\.|Mrs\.|Ms\.|Dr\.)\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\b/,
+  PHONE: /(?<!\d)(?:\+?\d{1,3}[-.\s]?)?(?:\(\d{3}\)\s*\d{3}[-.\s]?\d{4}|\b[6-9]\d{9}\b|\b0\d{2,4}[- ]?\d{6,8}\b)(?!\d)/,
+  EMAIL: /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/,
+  DOB: /\b(?:DOB|Date of Birth|Birth Date|Born)[:\s]*\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b/i,
+  PASSWORD: /(?:password|passwd)[:=\s]+\S+|\*{4,}/i,
+  PIN_CRED: /\b(?:ATM\s*PIN|MPIN|Security\s*PIN|OTP|One-Time\s*Password)[:\s]*\d{4,6}\b/i,
+  JWT_TOKEN: /\bBearer\s+eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\b|\beyJ[a-zA-Z0-9_-]{10,}\.eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\b/,
+  MEDICAL_RECORD: /\b(?:Patient\s*ID|MRN|Prescription\s*No|Rx\s*#)[:\s]*[A-Z0-9-]{4,16}\b/i,
 };
 
 const PLACEHOLDER_STRIP_RE = /\[[A-Z][A-Z_ ]*\]|\*{2,}/g;
@@ -457,6 +488,14 @@ export function checkFirewallViolations(text: string): string | null {
       return `${name} detected: ${match[0].slice(0, 4)}...`;
     }
   }
+
+  // Cycle 2.10: physical addresses have no single regex — they are a
+  // combination of components — so this check is heuristic rather than
+  // pattern-based, which is why it is delegated to the shared analyser.
+  if (containsFullAddress(clean)) {
+    return 'ADDRESS detected: multi-component physical address';
+  }
+
   return null;
 }
 
