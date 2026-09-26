@@ -13,6 +13,7 @@ import { validateImagePayload } from './imageSafety';
 import { originGuard, parseAllowedOrigins } from './originGuard';
 import { bodyLimit } from 'hono/body-limit';
 import { StepSchema } from './schemas';
+import { evaluateAction } from './actionPolicy';
 import {
   issueToken,
   verifyToken,
@@ -1480,7 +1481,54 @@ app.post('/api/step', async (c) => {
   parsed.taskMode = taskMode;
   parsed.domain = domain;
 
-  return c.json(parsed);
+  // -------------------------------------------------------------------------
+  //  Cycle 3.1 — ACTION POLICY GATE
+  // -------------------------------------------------------------------------
+  // The model's decision does NOT go straight to executeAction. It is evaluated
+  // here, server-side, and the extension receives the sanitised form plus an
+  // explicit risk verdict.
+  //
+  // Placing the gate on the server is the security property: the extension is
+  // JavaScript in a browser and cannot be trusted to police itself, and a
+  // compromised content script has no path to executeAction that skips this.
+  //
+  // This is what makes the earlier cycles' honest limitation true rather than
+  // merely stated: escaping and delimiting reduce the injection SURFACE, and
+  // this bounds the CONSEQUENCE.
+  const policyVerdict = evaluateAction(parsed, {
+    maxStep: Number(process.env.MAX_STEPS) || 35,
+    step: typeof step === 'number' ? step : 1,
+  });
+
+  if (!policyVerdict.allowed) {
+    log.warn(
+      `[Action policy] Blocked action for ${sessionId} step ${step}: ${policyVerdict.reason}`
+    );
+    // Return the terminal action rather than an error: the client loop expects
+    // a decision object, and a hard error here would abort a run that could
+    // still conclude cleanly.
+    return c.json({
+      ...policyVerdict.sanitized,
+      taskMode,
+      domain,
+      policyBlocked: true,
+      policyReason: policyVerdict.reason,
+    });
+  }
+
+  if (policyVerdict.requiresConfirmation) {
+    log.warn(
+      `[Action policy] Confirmation required for ${sessionId} step ${step}: ${policyVerdict.reason}`
+    );
+  }
+
+  return c.json({
+    ...policyVerdict.sanitized,
+    taskMode,
+    domain,
+    policyRisk: policyVerdict.risk,
+    requiresConfirmation: policyVerdict.requiresConfirmation,
+  });
 });
 
 // Global error handler

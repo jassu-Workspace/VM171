@@ -85,6 +85,10 @@ const mockChrome = {
 (globalThis as unknown as { chrome: unknown }).chrome = mockChrome;
 (globalThis as unknown as { browser: unknown }).browser = mockChrome;
 (globalThis as unknown as { defineContentScript: unknown }).defineContentScript = (def: unknown) => def;
+// WXT auto-imports these at build time. Tests import the background module
+// directly, so the identifiers must exist or the module throws on evaluation.
+(globalThis as unknown as { defineBackground: unknown }).defineBackground = (def: unknown) => def;
+(globalThis as unknown as { defineUnlistedScript: unknown }).defineUnlistedScript = (def: unknown) => def;
 
 if (typeof (globalThis as unknown as { PointerEvent: unknown }).PointerEvent === 'undefined') {
   class MockPointerEvent extends (typeof MouseEvent !== 'undefined' ? MouseEvent : Event) {

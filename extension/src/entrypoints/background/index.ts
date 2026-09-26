@@ -29,6 +29,74 @@ console.log('🛰 Background script initialized');
 // and an UNPAIRED extension must not send anything at all rather than fall back
 // to a default. See utils/config.ts for why the server URL is loopback-only.
 const MAX_STEPS = 35;
+
+// ── Cycle 3.2 — confirmation bookkeeping ──────────────────────────
+//
+// A confirmation is bound to the step AND the action, so a confirmation for one
+// click cannot be replayed as consent for a different one on a later step.
+// A Set of fingerprints, not a boolean per step.
+const confirmedActions = new Set<string>();
+
+function actionFingerprint(step: number, action: Record<string, unknown>): string {
+  return [
+    step,
+    String(action.action ?? ''),
+    String(action.id ?? ''),
+    String(action.selector ?? ''),
+    String(action.target ?? ''),
+    String(action.value ?? '').slice(0, 64),
+  ].join('|');
+}
+
+function isStepConfirmed(step: number, action: Record<string, unknown>): boolean {
+  return confirmedActions.has(actionFingerprint(step, action));
+}
+
+function markStepConfirmed(step: number, action: Record<string, unknown>): void {
+  confirmedActions.add(actionFingerprint(step, action));
+  // Bound the set: a long run must not accumulate confirmations forever.
+  if (confirmedActions.size > 64) {
+    const first = confirmedActions.values().next();
+    if (!first.done) confirmedActions.delete(first.value);
+  }
+}
+
+function clearConfirmations(): void {
+  confirmedActions.clear();
+}
+
+/** A short, human-readable description of what is about to happen. */
+export function describeAction(action: Record<string, unknown>): string {
+  const type = String(action.action ?? 'act');
+  const target =
+    (typeof action.target === 'string' && action.target) ||
+    (typeof action.selector === 'string' && action.selector) ||
+    (typeof action.id === 'string' && action.id) ||
+    (typeof action.value === 'string' && action.value.slice(0, 40)) ||
+    'the page';
+  return `${type} → ${target}`;
+}
+
+/**
+ * Ask the operator to confirm an irreversible action.
+ *
+ * Resolves false on ANY failure — a closed port, a crashed view, a timeout —
+ * because the safe default for a confirmation you cannot deliver is to not act.
+ */
+export async function requestHumanConfirmation(label: string): Promise<boolean> {
+  try {
+    const response = (await Promise.race([
+      browser.runtime.sendMessage({ type: 'REQUEST_CONFIRMATION', payload: { label } }),
+      new Promise<{ confirmed: boolean }>((res) =>
+        setTimeout(() => res({ confirmed: false }), 60_000)
+      ),
+    ])) as { confirmed?: boolean };
+    return response?.confirmed === true;
+  } catch (err) {
+    console.error('[Confirmation] request failed, defaulting to decline:', err);
+    return false;
+  }
+}
 const STEP_DELAY_MS = 2500;
 
 let stopRequested = false;
@@ -1563,6 +1631,35 @@ async function runAgentLoop(task: string, tabId: number): Promise<void> {
           }
           continue;
         }
+      }
+
+      // Cycle 3.1 — HONOUR THE SERVER'S POLICY VERDICT.
+      //
+      // A gate the client can ignore is theatre. The server evaluates the
+      // model's decision and returns `policyBlocked` / `requiresConfirmation`;
+      // the loop must act on both before anything reaches the content script.
+      if (aiDecision.policyBlocked) {
+        safeSendMessage({
+          type: 'LOG_UPDATE',
+          payload: `Step ${step}: Action blocked by server policy — ${aiDecision.policyReason ?? 'no reason given'}`,
+        });
+        safeSendMessage({ type: 'AGENT_ACTIVITY', payload: { step, phase: 'Blocked', statusText: 'Action blocked by policy' } });
+        break;
+      }
+
+      if (aiDecision.requiresConfirmation && !isStepConfirmed(step, aiDecision)) {
+        const label = describeAction(aiDecision);
+        const accepted = await requestHumanConfirmation(label);
+        if (!accepted) {
+          safeSendMessage({
+            type: 'LOG_UPDATE',
+            payload: `Step ${step}: Declined — "${label}" needs confirmation and was not approved.`,
+          });
+          safeSendMessage({ type: 'AGENT_STATUS', payload: { isRunning: false } });
+          break;
+        }
+        markStepConfirmed(step, aiDecision);
+        safeSendMessage({ type: 'LOG_UPDATE', payload: `Step ${step}: Confirmed — ${label}` });
       }
 
       // Step H: If action is 'click', 'select', 'zoom', 'type', 'navigate', 'scroll', or 'back', send EXECUTE_ACTION to the content script
