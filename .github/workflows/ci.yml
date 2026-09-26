@@ -153,7 +153,19 @@ jobs:
         working-directory: tests
 
       # The security + integration suites. 533 assertions across 43 files.
-      - name: Test (security, integration, unit)
+      # The E2E suite drives a REAL Chromium with the built extension loaded, so
+      # it needs the browser binary and a built bundle. Both were missing on the
+      # first CI run, which is why the E2E tests were `it.skip` stubs: nobody
+      # could run them, so they stayed skipped, so nobody found out.
+      - name: Install Chromium (E2E)
+        run: npx playwright install --with-deps chromium
+        working-directory: tests
+
+      - name: Build extension (E2E fixture)
+        run: npm run build
+        working-directory: extension
+
+      - name: Test (security, integration, unit, e2e)
         run: npm test
         working-directory: tests
 
