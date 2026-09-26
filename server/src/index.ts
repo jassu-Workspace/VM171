@@ -192,9 +192,11 @@ const app = new Hono();
 // ---------------------------------------------------------------------------
 //  Cycle 2.4 — BEARER TOKEN AUTHENTICATION (replaces the shared password)
 // ---------------------------------------------------------------------------
-// The old credential was a PUBLIC LITERAL: '141207' was hardcoded in the
-// extension source and shipped inside the built bundle, so anyone who unpacked
-// the extension held a working credential for the local server.
+// The old credential was a PUBLIC LITERAL: it was hardcoded in the extension
+// source and shipped inside the built bundle, so anyone who unpacked the
+// extension held a working credential for the local server. Its value is
+// deliberately not repeated in comments here — a secret written in prose is
+// still in the source, and is copy-paste bait for whoever reads it next.
 //
 // Replaced with a per-process random HS256 signing key plus a one-time pairing
 // code. Both are generated here and never written to the repository. The

@@ -7,6 +7,7 @@ import { browser } from 'wxt/browser';
 import * as ort from 'onnxruntime-web';
 import { generateSessionId, SessionLogger, AgentSession } from '../../utils/sessionLogger';
 import { resolveCaptureSource } from '../../utils/captureProvenance';
+import { getAgentConfig, authHeadersFor, isAllowedServerUrl, DEFAULT_SERVER_URL } from '../../utils/config';
 import { detectUIElements, getUIStatus, checkModelAvailability } from '../../utils/onnxEngine';
 import { getOcrStatus, checkOcrAvailability } from '../../utils/ocrEngine';
 
@@ -16,14 +17,23 @@ ort.env.wasm.numThreads = 1;
 
 console.log('🛰 Background script initialized');
 
-const SERVER_URL = 'http://localhost:3000/api/step';
-const SECRET_PASSWORD = '141207';
+// Cycle 2.4: the server URL and credential are NO LONGER compiled in.
+//
+// The old hardcoded shared secret was a public literal — it shipped inside the
+// built bundle, so anyone who unpacked the extension held a working credential
+// for the local server. Its value is deliberately NOT repeated here: a secret
+// written in a comment is still in the source, and is copy-paste bait for
+// whoever reads it next.
+//
+// Both values now come from browser storage, set once through the pairing flow,
+// and an UNPAIRED extension must not send anything at all rather than fall back
+// to a default. See utils/config.ts for why the server URL is loopback-only.
 const MAX_STEPS = 35;
 const STEP_DELAY_MS = 2500;
 
 let stopRequested = false;
 
-console.log('🌐 SERVER_URL:', SERVER_URL);
+console.log('🌐 Default server URL:', DEFAULT_SERVER_URL, '(the active URL comes from paired storage)');
 
 /**
  * PHASE 1 — Telemetry Engine (Mission Control Dashboard)
@@ -187,17 +197,27 @@ async function callServer(
     violations: string[];
   }
 ) {
-  console.log('🌐 Sending request to:', SERVER_URL);
+  // Cycle 2.4: refuse to send while unpaired. A default token here would be
+  // the public literal all over again.
+  const config = await getAgentConfig();
+  if (!config.valid) {
+    const message =
+      'Extension is not paired with a server. Open the extension options and complete pairing.';
+    console.error('❌', message);
+    throw new Error(message);
+  }
+  const target = `${config.serverUrl}/api/step`;
+  console.log('🌐 Sending request to:', target);
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 35_000);
 
-    const response = await fetch(SERVER_URL, {
+    const response = await fetch(target, {
       method: 'POST',
       mode: 'cors',
       headers: {
         'Content-Type': 'application/json',
-        'x-secret-password': SECRET_PASSWORD,
+        ...authHeadersFor(config),
       },
       body: JSON.stringify({
         task,

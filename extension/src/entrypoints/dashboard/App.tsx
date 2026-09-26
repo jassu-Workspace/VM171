@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { browser } from 'wxt/browser';
 import { useTheme } from '../../utils/theme';
+import { getAgentConfig, authHeadersFor } from '../../utils/config';
 import { ThemeToggle } from '../../components/ThemeToggle';
 import { getHardwareProfile, detectHardwareTier, HardwareProfile } from '../../utils/hardwareTier';
 
@@ -258,7 +259,12 @@ const App: React.FC = () => {
   const { theme, toggleTheme } = useTheme();
   const [telemetry, setTelemetry] = useState<TelemetryData>(DEFAULT_TELEMETRY);
   const [serverTelemetry, setServerTelemetry] = useState<ServerTelemetry | null>(null);
-  const [serverStatus, setServerStatus] = useState<'online' | 'offline' | 'connecting'>('connecting');
+  // 'unpaired' is distinct from 'offline' on purpose: telling the operator the
+// server is down when the real problem is that pairing was never completed
+// sends them to debug the wrong thing.
+  const [serverStatus, setServerStatus] = useState<
+    'online' | 'offline' | 'connecting' | 'checking' | 'unpaired'
+  >('connecting');
   const [modelStatus, setModelStatus] = useState<ModelStatusData>(DEFAULT_MODEL_STATUS);
   const [hardwareProfile, setHardwareProfile] = useState<HardwareProfile>(getHardwareProfile());
   const [memory, setMemory] = useState<MemoryState>({ supported: true, used: 0, total: 0, limit: 0 });
@@ -315,12 +321,21 @@ const App: React.FC = () => {
     let cancelled = false;
 
     const pollOnce = async () => {
-      // 0) Server & Host Telemetry (real host RAM, CPU, session storage, upstream AI)
+      // 0) Server & Host Telemetry.
+      //
+      // Cycle 2.4: the URL and credential come from paired browser storage, not
+      // from literals in this bundle. An unpaired extension skips the request
+      // entirely rather than falling back to a default, and the UI reports
+      // 'unpaired' instead of a misleading 'offline'.
+      const cfg = await getAgentConfig();
+      if (!cfg.valid) {
+        if (!cancelled) setServerStatus('unpaired');
+        return;
+      }
+      if (!cancelled) setServerStatus('checking');
       try {
-        const res = await fetch('http://localhost:3000/api/system-telemetry', {
-          headers: {
-            'x-secret-password': '141207',
-          },
+        const res = await fetch(`${cfg.serverUrl}/api/system-telemetry`, {
+          headers: authHeadersFor(cfg),
         });
         if (res.ok) {
           const sysData = (await res.json()) as ServerTelemetry;
@@ -337,10 +352,8 @@ const App: React.FC = () => {
 
       // 0b) Server Saved Sessions Vault
       try {
-        const sessRes = await fetch('http://localhost:3000/api/sessions', {
-          headers: {
-            'x-secret-password': '141207',
-          },
+        const sessRes = await fetch(`${cfg.serverUrl}/api/sessions`, {
+          headers: authHeadersFor(cfg),
         });
         if (sessRes.ok) {
           const sessData = (await sessRes.json()) as { sessions?: any[] };

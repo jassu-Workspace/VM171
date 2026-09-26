@@ -1,9 +1,61 @@
 /**
- * Test setup for WXT extension globals in Vitest
+ * Stateful chrome.storage mock — Cycle 2.2
+ * ---------------------------------------------------------------------------
+ * WHY THIS EXISTS
+ *
+ * The original mock was:
+ *
+ *     storage: { local: { get: vi.fn().mockResolvedValue({}), set: vi.fn(), remove: vi.fn() } }
+ *
+ * `get` returned a fresh `{}` for every call and `set` discarded its argument.
+ * Every test using it therefore saw permanently EMPTY storage, no matter what
+ * it wrote. A test like "persists and reads back a config" would pass against
+ * that mock for the wrong reason — or fail, depending on how it was written.
+ *
+ * This harness is backed by a real Map, so get/set/remove behave as the
+ * browser API does, including returning undefined for a key that was never
+ * set. That last detail is load-bearing: it is what lets a test distinguish
+ * "unpaired" from "configured".
+ *
+ * `__resetStorage()` is a TEST UTILITY and lives here in the setup file, never
+ * on a production class.
  */
 import { vi } from 'vitest';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+
+const store = new Map<string, unknown>();
+
+export function __resetStorage(): void {
+  store.clear();
+}
+
+const localArea = {
+  get: vi.fn(async (keys?: string | string[] | null): Promise<Record<string, unknown>> => {
+    if (keys === undefined || keys === null) {
+      return Object.fromEntries(store);
+    }
+    const list = Array.isArray(keys) ? keys : [keys];
+    const out: Record<string, unknown> = {};
+    for (const k of list) {
+      if (store.has(k)) out[k] = store.get(k);
+    }
+    return out;
+  }),
+
+  set: vi.fn(async (items: Record<string, unknown>): Promise<void> => {
+    for (const [k, v] of Object.entries(items ?? {})) store.set(k, v);
+  }),
+
+  remove: vi.fn(async (keys: string | string[]): Promise<void> => {
+    const list = Array.isArray(keys) ? keys : [keys];
+    for (const k of list) store.delete(k);
+  }),
+
+  clear: vi.fn(async (): Promise<void> => {
+    store.clear();
+  }),
+};
 
 const mockChrome = {
   runtime: {
@@ -21,64 +73,61 @@ const mockChrome = {
     create: vi.fn().mockResolvedValue({ id: 2 }),
   },
   storage: {
-    local: {
-      get: vi.fn().mockResolvedValue({}),
-      set: vi.fn().mockResolvedValue(undefined),
-      remove: vi.fn().mockResolvedValue(undefined),
-    },
+    local: localArea,
+    session: localArea,
+    sync: localArea,
   },
   scripting: {
     executeScript: vi.fn().mockResolvedValue([]),
   },
 };
 
-(globalThis as any).chrome = mockChrome;
-(globalThis as any).browser = mockChrome;
-(globalThis as any).defineContentScript = (def: any) => def;
+(globalThis as unknown as { chrome: unknown }).chrome = mockChrome;
+(globalThis as unknown as { browser: unknown }).browser = mockChrome;
+(globalThis as unknown as { defineContentScript: unknown }).defineContentScript = (def: unknown) => def;
 
-if (typeof (globalThis as any).PointerEvent === 'undefined') {
+if (typeof (globalThis as unknown as { PointerEvent: unknown }).PointerEvent === 'undefined') {
   class MockPointerEvent extends (typeof MouseEvent !== 'undefined' ? MouseEvent : Event) {
     pointerId: number;
     pointerType: string;
     isPrimary: boolean;
-    constructor(type: string, params: any = {}) {
+    constructor(type: string, params: Record<string, unknown> = {}) {
       super(type, params);
-      this.pointerId = params.pointerId ?? 0;
-      this.pointerType = params.pointerType ?? 'mouse';
-      this.isPrimary = params.isPrimary ?? false;
+      this.pointerId = (params.pointerId as number) ?? 0;
+      this.pointerType = (params.pointerType as string) ?? '';
+      this.isPrimary = (params.isPrimary as boolean) ?? false;
     }
   }
-  (globalThis as any).PointerEvent = MockPointerEvent;
+  (globalThis as unknown as { PointerEvent: unknown }).PointerEvent = MockPointerEvent;
 }
 
-// Cycle 2.4: the shared password is no longer a credential. The server now
-// issues signed bearer tokens; the legacy `x-secret-password` header is
-// rejected on purpose. SECRET_PASSWORD is retained ONLY so the Cycle 1.8
-// logger-redaction tests have a realistic secret to prove it never gets logged.
+// ── Server-side environment ────────────────────────────────────────
+//
+// Cycle 2.4: the shared password is no longer a credential. The server issues
+// signed bearer tokens and the legacy `x-secret-password` header is rejected on
+// purpose. SECRET_PASSWORD is retained ONLY so the Cycle 1.8 logger-redaction
+// tests have a realistic secret to prove is never written to a log.
 process.env.SECRET_PASSWORD = process.env.SECRET_PASSWORD || 'test-secret-password';
 
-// A KNOWN signing key and pairing code, so tests can mint valid tokens. In
-// normal operation both are generated per process and never leave the console.
-process.env.SECRETS_SIGNING_KEY = process.env.SECRETS_SIGNING_KEY || 'test-signing-key-0123456789abcdefghijklmno';
+// A KNOWN signing key and pairing code so tests can mint valid tokens. In
+// normal operation both are generated per process and only ever reach the
+// operator's console.
+process.env.SECRETS_SIGNING_KEY =
+  process.env.SECRETS_SIGNING_KEY || 'test-signing-key-0123456789abcdefghijklmno';
 process.env.SECRETS_PAIRING_CODE = process.env.SECRETS_PAIRING_CODE || 'test-pairing-code-0123456789';
 
-// Cycle 2.5: the server reads ALLOWED_ORIGINS at import time, and setup files
-// run before test modules, so this must be set here — not inside a test file —
-// or the origin guard would reject every supertest/app.request call.
 process.env.ALLOWED_ORIGINS =
   process.env.ALLOWED_ORIGINS ||
   'chrome-extension://test-extension-id,http://localhost:3300,http://localhost:3000';
 
-// Cycle 2.7: the body limit is read at import time. Tests need a SMALL limit so
-// an oversized-payload case is cheap to exercise; production defaults to 20 MB
-// (measured worst case is ~0.8 MB). 32 KB is enough to send a 200 KB body in a
-// unit test and still leave room for the byte-vs-character case, which needs a
-// body whose UTF-8 length exceeds the limit while its UTF-16 length does not.
+// Cycle 2.7: read at import time, so tests need a small limit to exercise the
+// oversized case cheaply. Production defaults to 20 MB.
 process.env.MAX_BODY_BYTES = process.env.MAX_BODY_BYTES || '32768';
 
 // Cycle 2.13: point session storage at a throwaway root BEFORE the server
 // modules are imported. Without this the retention tests write into — and prune
 // — the operator's real storage/sessions, which already happened once.
 process.env.SESSION_STORAGE_DIR =
-  process.env.SESSION_STORAGE_DIR ||
-  join(tmpdir(), `ztai-test-storage-${process.pid}`);
+  process.env.SESSION_STORAGE_DIR || join(tmpdir(), `ztai-test-storage-${process.pid}`);
+
+export { localArea };
