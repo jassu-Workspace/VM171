@@ -12,6 +12,7 @@ import { saveSessionStep, initSession, finalizeSession, getStorageStats, listSes
 import { validateImagePayload } from './imageSafety';
 import { originGuard, parseAllowedOrigins } from './originGuard';
 import { bodyLimit } from 'hono/body-limit';
+import { StepSchema } from './schemas';
 import { getConnInfo } from '@hono/node-server/conninfo';
 import {
   evaluateRedactionPolicy,
@@ -802,6 +803,30 @@ app.post('/api/step', async (c) => {
     return c.json({ error: 'Invalid JSON in request body.' }, 400);
   }
 
+  // Cycle 2.9 (Task 3): one declared contract replaces the ad-hoc typeof checks
+  // that only ever covered `task` and `maskedDom`. Everything else — the base64
+  // images, the legend, the action history, the sub-task list — was previously
+  // accepted on trust, with no shape check, no ceiling, and no rejection of
+  // unknown keys. `.strict()` means the client's twelve keys are the only keys.
+  //
+  // ORDERING: this runs BEFORE the PII firewall below. Malformed payloads are
+  // rejected on SHAPE; the firewall still guards well-formed ones. Both layers
+  // survive — defence in depth.
+  const validated = StepSchema.safeParse(body);
+  if (!validated.success) {
+    const first = validated.error.issues[0];
+    log.warn(
+      `Schema violation from ${clientIp} — 400 returned: ${first?.path.join('.') ?? '(root)'}: ${first?.message ?? 'invalid'}`
+    );
+    return c.json(
+      {
+        error: 'INVALID_REQUEST_SHAPE',
+        detail: first ? `${first.path.join('.') || '(root)'}: ${first.message}` : 'invalid payload',
+      },
+      400
+    );
+  }
+
   const {
     task,
     maskedDom,
@@ -815,45 +840,20 @@ app.post('/api/step', async (c) => {
     subTasks: clientSubTasks,
     actionHistory: clientActionHistory,
     redaction: clientRedaction,
-  } = body as Record<string, unknown>;
+  } = validated.data;
 
-  if (typeof task !== 'string' || task.trim().length === 0) {
-    log.warn(`Invalid 'task' field from ${clientIp} — 400 returned`);
-    return c.json({ error: "'task' must be a non-empty string." }, 400);
-  }
-  if (typeof maskedDom !== 'string') {
-    log.warn(`Invalid 'maskedDom' field from ${clientIp} — 400 returned`);
-    return c.json({ error: "'maskedDom' must be a string." }, 400);
-  }
-
-  let imageBase64 = '';
-  if (redactedImage === undefined || redactedImage === null) {
-    imageBase64 = '';
-  } else if (typeof redactedImage === 'string') {
-    imageBase64 = redactedImage;
-  } else {
-    log.warn(`Invalid 'redactedImage' field from ${clientIp} — 400 returned`);
-    return c.json({ error: "'redactedImage' must be a string." }, 400);
-  }
+  const imageBase64 = typeof redactedImage === 'string' ? redactedImage : '';
 
   const incomingVlmImage = (typeof vlmImage === 'string' && vlmImage.trim().length > 50) ? vlmImage.trim() : '';
   const finalVlmImage = incomingVlmImage || imageBase64 || (typeof rawImage === 'string' ? rawImage : undefined);
 
-  let legendArray: unknown[] = [];
-  if (redaction_legend === undefined || redaction_legend === null) {
-    legendArray = [];
-  } else if (Array.isArray(redaction_legend)) {
-    legendArray = redaction_legend;
-  } else {
-    log.warn(`Invalid 'redaction_legend' field from ${clientIp} — 400 returned`);
-    return c.json({ error: "'redaction_legend' must be an array." }, 400);
-  }
+  const legendArray: unknown[] = redaction_legend ?? [];
 
   const incomingScratchpad = (typeof scratchpad === 'object' && scratchpad !== null) ? scratchpad : null;
   const sessionId = (typeof clientSessionId === 'string' && clientSessionId.trim()) ? clientSessionId.trim() : `session_${randomUUID()}`;
   const step = typeof clientStep === 'number' ? clientStep : 1;
-  const subTasks = Array.isArray(clientSubTasks) ? (clientSubTasks as string[]) : [];
-  const actionHistory = Array.isArray(clientActionHistory) ? (clientActionHistory as Array<Record<string, unknown>>) : [];
+  const subTasks = clientSubTasks ?? [];
+  const actionHistory = clientActionHistory ?? [];
 
   // ZERO-TRUST SECURITY FIREWALL GATE: Rejects unmasked PII payloads before reaching upstream VLMs
   const firewallViolation = checkFirewallViolations(maskedDom);

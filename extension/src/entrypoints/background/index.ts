@@ -178,7 +178,14 @@ async function callServer(
   rawImage?: string,
   subTasks?: string[],
   actionHistory?: Array<{ action: string; target?: string; value?: string }>,
-  vlmImage?: string
+  vlmImage?: string,
+  redactionEnvelope?: {
+    state: 'verified' | 'degraded' | 'unavailable';
+    engine: string;
+    degradedAt: string | null;
+    reason: string;
+    violations: string[];
+  }
 ) {
   console.log('🌐 Sending request to:', SERVER_URL);
   try {
@@ -204,6 +211,11 @@ async function callServer(
         vlmImage: vlmImage || redactedImage || rawImage,
         subTasks,
         actionHistory,
+        // Cycle 1.4 integration gap: the envelope was computed but never sent,
+        // so the server evaluated `undefined` for every step and counted the
+        // whole run as unavailable. A permanently-firing alarm is worse than no
+        // alarm, because it teaches the operator to ignore the signal.
+        redaction: redactionEnvelope ?? null,
       }),
       signal: controller.signal,
     });
@@ -1009,7 +1021,24 @@ async function runAgentLoop(task: string, tabId: number): Promise<void> {
           archivalRawImage,
           subTasks,
           actionHistory.slice(-8),
-          vlmImage
+          vlmImage,
+          redactionState === 'verified'
+            ? {
+                state: 'verified',
+                engine: 'mediapipe',
+                degradedAt: null,
+                reason: 'Redaction verified locally before release.',
+                violations: [],
+              }
+            : {
+                state: redactionState === 'degraded' ? 'degraded' : 'unavailable',
+                engine: 'mediapipe',
+                // The server ranks states by arrival order and never trusts a
+                // client timestamp, so this is left null rather than invented.
+                degradedAt: null,
+                reason: degradedReason ?? 'No outbound frame this step.',
+                violations: [],
+              }
         );
         // Telemetry: record latency, request count, and outbound payload size.
         telemetryData.lastLatency = Date.now() - roundTripStart;
