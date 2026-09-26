@@ -8,11 +8,17 @@ import {
   getStorageStats,
   listSessions,
   getSessionDetails,
+  SESSIONS_DIR,
 } from '../../server/src/sessionStorage';
 
 describe('Local Session Storage Engine', () => {
   const testSessionId = `test-session-${Date.now()}`;
-  const sessionDir = join(process.cwd(), '..', 'storage', 'sessions', testSessionId);
+  // Cycle 2.13: use the exported SESSIONS_DIR rather than re-deriving the path.
+  // The storage root is now overridable via SESSION_STORAGE_DIR so the suite
+  // writes to a temp directory instead of the operator's real sessions — which
+  // is exactly what this hardcoded path prevented. Re-deriving the path here
+  // would be a second copy that can silently drift from the module's.
+  const sessionDir = join(SESSIONS_DIR, testSessionId);
 
   afterEach(() => {
     try {

@@ -2,6 +2,8 @@
  * Test setup for WXT extension globals in Vitest
  */
 import { vi } from 'vitest';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 const mockChrome = {
   runtime: {
@@ -65,4 +67,9 @@ process.env.ALLOWED_ORIGINS =
 // body whose UTF-8 length exceeds the limit while its UTF-16 length does not.
 process.env.MAX_BODY_BYTES = process.env.MAX_BODY_BYTES || '32768';
 
-
+// Cycle 2.13: point session storage at a throwaway root BEFORE the server
+// modules are imported. Without this the retention tests write into — and prune
+// — the operator's real storage/sessions, which already happened once.
+process.env.SESSION_STORAGE_DIR =
+  process.env.SESSION_STORAGE_DIR ||
+  join(tmpdir(), `ztai-test-storage-${process.pid}`);

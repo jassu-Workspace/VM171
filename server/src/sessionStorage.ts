@@ -1,10 +1,20 @@
-import { mkdirSync, writeFileSync, existsSync, readdirSync, statSync, readFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, existsSync, readdirSync, statSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = join(__filename, '..', '..');
-const SESSIONS_DIR = join(__dirname, '..', 'storage', 'sessions');
+// Exported (Cycle 2.13) so retention tests can create and assert against real
+// session directories without duplicating this path resolution — a second
+// copy of the path is another thing that can drift.
+//
+// SESSION_STORAGE_DIR overrides the root. This exists because the retention
+// tests must NEVER write into the operator's real storage: an earlier version
+// of them did exactly that, and left residue behind. A test suite that can
+// delete real user data is not a test suite, it is a hazard.
+export const SESSIONS_DIR = process.env.SESSION_STORAGE_DIR
+  ? join(process.env.SESSION_STORAGE_DIR, 'sessions')
+  : join(__dirname, '..', 'storage', 'sessions');
 
 export interface StepStorageData {
   sessionId: string;
@@ -42,8 +52,8 @@ export interface SessionMeta {
  * Initializes a session directory structure under storage/sessions/<sessionId>/
  */
 export function initSession(sessionId: string, initialTask: string = ''): string {
-  const safeSessionId = sessionId.replace(/[^a-zA-Z0-9_-]/g, '_');
-  const sessionPath = join(SESSIONS_DIR, safeSessionId);
+  const safe = safeSessionId(sessionId);
+  const sessionPath = join(SESSIONS_DIR, safe);
 
   try {
     if (!existsSync(sessionPath)) {
@@ -70,7 +80,7 @@ export function initSession(sessionId: string, initialTask: string = ''): string
     const metaFile = join(sessionPath, 'session_meta.json');
     if (!existsSync(metaFile)) {
       const meta: SessionMeta = {
-        sessionId: safeSessionId,
+        sessionId: safe,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
         status: 'active',
@@ -103,8 +113,8 @@ export function initSession(sessionId: string, initialTask: string = ''): string
  */
 export function saveSessionStep(data: StepStorageData): void {
   try {
-    const safeSessionId = data.sessionId.replace(/[^a-zA-Z0-9_-]/g, '_');
-    const sessionPath = initSession(safeSessionId, data.task);
+    const safe = safeSessionId(data.sessionId);
+    const sessionPath = initSession(safe, data.task);
 
     // Helper function to decode and save base64 image across directory targets
     const saveImageToDirs = (dirs: string[], filename: string, base64Str: string): number => {
@@ -185,7 +195,7 @@ export function saveSessionStep(data: StepStorageData): void {
         meta = JSON.parse(readFileSync(metaFile, 'utf8'));
       } catch {
         meta = {
-          sessionId: safeSessionId,
+          sessionId: safe,
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
           status: 'active',
@@ -197,7 +207,7 @@ export function saveSessionStep(data: StepStorageData): void {
       }
     } else {
       meta = {
-        sessionId: safeSessionId,
+        sessionId: safe,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
         status: 'active',
@@ -246,8 +256,8 @@ export function saveSessionStep(data: StepStorageData): void {
  */
 export function finalizeSession(sessionId: string, status: 'completed' | 'aborted' | 'error', summary?: string): void {
   try {
-    const safeSessionId = sessionId.replace(/[^a-zA-Z0-9_-]/g, '_');
-    const sessionPath = join(SESSIONS_DIR, safeSessionId);
+    const safe = safeSessionId(sessionId);
+    const sessionPath = join(SESSIONS_DIR, safe);
     const metaFile = join(sessionPath, 'session_meta.json');
 
     if (existsSync(metaFile)) {
@@ -266,6 +276,20 @@ export function finalizeSession(sessionId: string, status: 'completed' | 'aborte
 }
 
 export const initSessionDir = initSession;
+
+/**
+ * Cycle 2.13: the traversal sanitiser is now a named, exported, TESTABLE
+ * function rather than an inline `.replace()` repeated at three call sites.
+ *
+ * This is the only thing standing between a client-supplied `sessionId` and the
+ * filesystem. It was correct before; it is now asserted by tests AND mutation-
+ * proven, so a future refactor that inlines it again cannot silently drop it.
+ * Everything outside [A-Za-z0-9_-] becomes '_', which also collapses '/' and
+ * '\' and so neutralises '..' traversal on both POSIX and Windows.
+ */
+export function safeSessionId(sessionId: string): string {
+  return String(sessionId).replace(/[^a-zA-Z0-9_-]/g, '_');
+}
 
 /**
  * Calculates storage statistics across all saved sessions for the dashboard
@@ -358,8 +382,8 @@ export function getSessionDetails(sessionId: string): {
   }>;
 } | null {
   try {
-    const safeSessionId = sessionId.replace(/[^a-zA-Z0-9_-]/g, '_');
-    const sessionPath = join(SESSIONS_DIR, safeSessionId);
+    const safe = safeSessionId(sessionId);
+    const sessionPath = join(SESSIONS_DIR, safe);
     const metaFile = join(sessionPath, 'session_meta.json');
     if (!existsSync(metaFile)) return null;
 
@@ -404,5 +428,99 @@ export function getSessionDetails(sessionId: string): {
     return { meta, steps };
   } catch {
     return null;
+  }
+}
+
+/**
+ * Prune stored sessions — Cycle 2.13.
+ *
+ * Every session directory holds un-redacted `raw-images/` alongside the masked
+ * frames, plus VLM responses and the user's raw task text. That is exactly the
+ * material this project exists to keep local, and it previously accumulated
+ * without limit: three JPEGs per step with MAX_STEPS=35 means a single long run
+ * is ~10 MB, and the directory was committed to git until the Cycle 1 hygiene
+ * work. Retention is therefore a security control here, not housekeeping.
+ *
+ * Ordering: age first, then count. A session can fail either test; applying
+ * count after age means the cap is evaluated against what actually survived.
+ *
+ * Two deliberate refusals to delete:
+ *   - a directory with no session_meta.json — that is a session an in-flight
+ *     step is still creating, and deleting it would break the active run
+ *   - a session_meta.json that will not parse — corrupt JSON must not become
+ *     silent deletion of real user data
+ */
+export interface PruneOptions {
+  retentionDays: number;
+  maxSessions: number;
+}
+
+export interface PruneResult {
+  removed: number;
+  remaining: number;
+}
+
+export function pruneSessions(options: PruneOptions): PruneResult {
+  const { retentionDays, maxSessions } = options;
+  const removed: string[] = [];
+
+  try {
+    if (!existsSync(SESSIONS_DIR)) return { removed: 0, remaining: 0 };
+
+    const now = Date.now();
+    const cutoff = now - retentionDays * 24 * 60 * 60 * 1000;
+    const survivors: Array<{ id: string; stamp: number }> = [];
+
+    for (const entry of readdirSync(SESSIONS_DIR)) {
+      const metaFile = join(SESSIONS_DIR, entry, 'session_meta.json');
+
+      // Refuse to delete an in-flight session: no metadata means a step is
+      // still being written.
+      if (!existsSync(metaFile)) continue;
+
+      let meta: SessionMeta;
+      try {
+        meta = JSON.parse(readFileSync(metaFile, 'utf8'));
+      } catch {
+        // Corrupt metadata is not evidence of an expired session.
+        continue;
+      }
+
+      // updatedAt wins over createdAt so a long-running agent loop is not
+      // deleted mid-run just because it started a week ago.
+      const stampSource = meta.updatedAt || meta.createdAt;
+      const stamp = stampSource ? new Date(stampSource).getTime() : NaN;
+
+      if (Number.isNaN(stamp)) continue;
+
+      if (stamp < cutoff) {
+        try {
+          rmSync(join(SESSIONS_DIR, entry), { recursive: true, force: true });
+          removed.push(entry);
+        } catch {
+          // A session we cannot remove is not fatal; skip it.
+        }
+        continue;
+      }
+
+      survivors.push({ id: entry, stamp });
+    }
+
+    // Count cap: newest kept, oldest evicted.
+    survivors.sort((a, b) => b.stamp - a.stamp);
+    const keep = survivors.slice(0, Math.max(0, maxSessions));
+    for (const victim of survivors.slice(keep.length)) {
+      try {
+        rmSync(join(SESSIONS_DIR, victim.id), { recursive: true, force: true });
+        removed.push(victim.id);
+      } catch {
+        // ignore
+      }
+    }
+
+    return { removed: removed.length, remaining: keep.length };
+  } catch {
+    // Never throw into the request pipeline or the boot sequence.
+    return { removed: removed.length, remaining: 0 };
   }
 }
