@@ -25,6 +25,7 @@ import {
   SAFE_TOKENS,
   stripOwnMasks,
 } from '../../utils/leakVerifier';
+import { buildElementMeta, sanitizeAttribute, DEFAULT_VALUE_CAP } from '../../utils/outboundText';
 import {
   evaluateTextPII,
   isIdCardGeometry,
@@ -218,19 +219,26 @@ export function getMaskedDom(): string {
       if (tagName === 'input' || tagName === 'textarea' || element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
         const inputType = tagName === 'input' ? ((element as HTMLInputElement).type || 'text') : 'textarea';
         if (inputType === 'hidden') return;
-        meta = `type="${inputType}"`;
+        // Cycle 1.6 (N3): every value below is page-controlled and was
+        // interpolated raw. Quotes and newlines let a page forge attributes, or
+        // entire extra elements, in the map the model reads; an unbounded
+        // `value` could inflate tokens and cost without limit. Escape-then-cap.
         const el = element as HTMLInputElement | HTMLTextAreaElement;
-        if (el.id) meta += ` id="${el.id}"`;
-        if (el.name) meta += ` name="${el.name}"`;
         const placeholder = el.placeholder || el.getAttribute('placeholder') || '';
-        if (placeholder) meta += ` placeholder="${placeholder}"`;
+        meta = buildElementMeta(
+          { type: inputType, id: el.id, name: el.name, placeholder },
+          DEFAULT_VALUE_CAP
+        );
         const value = el.value || '';
+        const safeValue = sanitizeAttribute(value, DEFAULT_VALUE_CAP);
+        const safePlaceholder = sanitizeAttribute(placeholder, DEFAULT_VALUE_CAP);
+        const safeName = sanitizeAttribute(el.name, DEFAULT_VALUE_CAP);
         if (value) {
-          elementText = `value="${value}"`;
+          elementText = `value="${safeValue}"`;
         } else if (placeholder) {
-          elementText = `(empty input, placeholder: "${placeholder}")`;
+          elementText = `(empty input, placeholder: "${safePlaceholder}")`;
         } else if (el.name) {
-          elementText = `name="${el.name}"`;
+          elementText = `name="${safeName}"`;
         } else {
           elementText = '(empty input)';
         }
