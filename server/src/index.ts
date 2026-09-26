@@ -14,6 +14,8 @@ import { originGuard, parseAllowedOrigins } from './originGuard';
 import { bodyLimit } from 'hono/body-limit';
 import { StepSchema } from './schemas';
 import { evaluateAction } from './actionPolicy';
+import { resolveCompletion } from './completion';
+import type { CompletionFn } from './completionTypes';
 import {
   issueToken,
   verifyToken,
@@ -1223,118 +1225,156 @@ app.post('/api/step', async (c) => {
     }
   }
 
-  let parsed: Record<string, unknown> | null = null;
-  let lastError: unknown = null;
-  let rawVlmResponse = '';
+  // -----------------------------------------------------------------------
+  //  Cycle 2.1 — COMPLETION SEAM
+  // -----------------------------------------------------------------------
+  // The provider chain below is wrapped as a CompletionFn and resolved through
+  // `resolveCompletion`, which returns a test-installed override when one is
+  // present. In normal operation the override is null and this is exactly the
+  // chain that was always here; the only change is that the network call is now
+  // reachable from a test, which is what lets the suite drive the REAL server
+  // instead of the hand-written mirror in serverContract.test.ts.
+  const providerChain: CompletionFn = async (request) => {
+    const { sessionId, systemPrompt, userContent } = request;
+    let parsed: Record<string, unknown> | null = null;
+    let lastError: unknown = null;
+    let rawVlmResponse = '';
 
-  // -------------------------------------------------------------------------
-  //  PRIORITY 1: Google Gemini API (if GEMINI_API_KEY is present)
-  // -------------------------------------------------------------------------
-  if (hasGemini) {
-    const geminiClient = new OpenAI({
-      apiKey: process.env.GEMINI_API_KEY,
-      baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai/',
-    });
+    // -------------------------------------------------------------------------
+    //  PRIORITY 1: Google Gemini API (if GEMINI_API_KEY is present)
+    // -------------------------------------------------------------------------
+    if (hasGemini) {
+      const geminiClient = new OpenAI({
+        apiKey: process.env.GEMINI_API_KEY,
+        baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai/',
+      });
 
-    const geminiModels = [
-      process.env.GEMINI_MODEL || 'gemini-2.5-flash',
-      'gemini-2.5-flash',
-      'gemini-2.0-flash',
-      'gemini-1.5-flash',
-    ].filter((v, i, a) => a.indexOf(v) === i);
+      const geminiModels = [
+        process.env.GEMINI_MODEL || 'gemini-2.5-flash',
+        'gemini-2.5-flash',
+        'gemini-2.0-flash',
+        'gemini-1.5-flash',
+      ].filter((v, i, a) => a.indexOf(v) === i);
 
-    for (const model of geminiModels) {
-      log.info(`[Priority 1: Gemini] Calling model '${model}' for session ${sessionId}...`);
-      try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 35_000);
+      for (const model of geminiModels) {
+        log.info(`[Priority 1: Gemini] Calling model '${model}' for session ${sessionId}...`);
+        try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 35_000);
 
-        const completion = await geminiClient.chat.completions.create({
-          model,
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: userContent },
-          ],
-          // @ts-expect-error signal is supported
-          signal: controller.signal,
-        });
+          const completion = await geminiClient.chat.completions.create({
+            model,
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: userContent },
+            ],
+            // @ts-expect-error signal is supported
+            signal: controller.signal,
+          });
 
-        clearTimeout(timeoutId);
+          clearTimeout(timeoutId);
 
-        const raw = completion.choices[0]?.message?.content ?? '';
-        log.info(`Gemini response from '${model}' (first 200 chars): ${raw.slice(0, 200)}`);
-        parsed = parseActionJson(raw);
-        rawVlmResponse = raw;
-        log.success(`JSON parse succeeded with Gemini model '${model}' for session ${sessionId}`);
-        break;
-      } catch (geminiErr: unknown) {
-        lastError = geminiErr;
-        const errMsg = geminiErr instanceof Error ? geminiErr.message : 'Unknown Gemini error';
-        log.warn(`Gemini model '${model}' failed: ${errMsg}. Trying next candidate...`);
-      }
-    }
-  }
-
-  // -------------------------------------------------------------------------
-  //  PRIORITY 2: 9router Fallback (if Gemini failed or GEMINI_API_KEY missing)
-  // -------------------------------------------------------------------------
-  if (!parsed && hasRouter) {
-    log.info(`[Priority 2: 9router] Calling 9router fallback for session ${sessionId}...`);
-    const routerClient = new OpenAI({
-      baseURL: process.env.ROUTER_URL,
-      apiKey: process.env.ROUTER_API_KEY,
-    });
-
-    const PRIMARY_MODEL = process.env.MODEL_NAME || 'ag/gemini-3.7-flash-high';
-    const CANDIDATE_MODELS = [
-      PRIMARY_MODEL,
-      'ag/gemini-3.8-flash-high',
-      'gemini/gemini-3.7-flash',
-      'gemini/gemini-3.8-flash',
-      'claude-all-mix',
-    ].filter((v, i, a) => a.indexOf(v) === i);
-
-    for (const model of CANDIDATE_MODELS) {
-      log.info(`[9router] Calling model '${model}' for session ${sessionId}...`);
-      try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 35_000);
-
-        const completion = await routerClient.chat.completions.create({
-          model,
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: userContent },
-          ],
-          // @ts-expect-error signal is supported
-          signal: controller.signal,
-        });
-
-        clearTimeout(timeoutId);
-
-        const raw = completion.choices[0]?.message?.content ?? '';
-        log.info(`9router response from '${model}' (first 200 chars): ${raw.slice(0, 200)}`);
-
-        if (raw.toLowerCase().includes('is no longer available') || raw.toLowerCase().includes('not available')) {
-          log.warn(`Model '${model}' returned deprecation notice. Trying next...`);
-          continue;
+          const raw = completion.choices[0]?.message?.content ?? '';
+          log.info(`Gemini response from '${model}' (first 200 chars): ${raw.slice(0, 200)}`);
+          parsed = parseActionJson(raw);
+          rawVlmResponse = raw;
+          log.success(`JSON parse succeeded with Gemini model '${model}' for session ${sessionId}`);
+          break;
+        } catch (geminiErr: unknown) {
+          lastError = geminiErr;
+          const errMsg = geminiErr instanceof Error ? geminiErr.message : 'Unknown Gemini error';
+          log.warn(`Gemini model '${model}' failed: ${errMsg}. Trying next candidate...`);
         }
-
-        parsed = parseActionJson(raw);
-        rawVlmResponse = raw;
-        log.success(`JSON parse succeeded with 9router model '${model}' for session ${sessionId}`);
-        break;
-      } catch (routerErr: unknown) {
-        lastError = routerErr;
-        const errMsg = routerErr instanceof Error ? routerErr.message : 'Unknown 9router error';
-        log.warn(`9router model '${model}' failed: ${errMsg}. Trying next...`);
       }
     }
-  }
 
+    // -------------------------------------------------------------------------
+    //  PRIORITY 2: 9router Fallback (if Gemini failed or GEMINI_API_KEY missing)
+    // -------------------------------------------------------------------------
+    if (!parsed && hasRouter) {
+      log.info(`[Priority 2: 9router] Calling 9router fallback for session ${sessionId}...`);
+      const routerClient = new OpenAI({
+        baseURL: process.env.ROUTER_URL,
+        apiKey: process.env.ROUTER_API_KEY,
+      });
+
+      const PRIMARY_MODEL = process.env.MODEL_NAME || 'ag/gemini-3.7-flash-high';
+      const CANDIDATE_MODELS = [
+        PRIMARY_MODEL,
+        'ag/gemini-3.8-flash-high',
+        'gemini/gemini-3.7-flash',
+        'gemini/gemini-3.8-flash',
+        'claude-all-mix',
+      ].filter((v, i, a) => a.indexOf(v) === i);
+
+      for (const model of CANDIDATE_MODELS) {
+        log.info(`[9router] Calling model '${model}' for session ${sessionId}...`);
+        try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 35_000);
+
+          const completion = await routerClient.chat.completions.create({
+            model,
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: userContent },
+            ],
+            // @ts-expect-error signal is supported
+            signal: controller.signal,
+          });
+
+          clearTimeout(timeoutId);
+
+          const raw = completion.choices[0]?.message?.content ?? '';
+          log.info(`9router response from '${model}' (first 200 chars): ${raw.slice(0, 200)}`);
+
+          if (raw.toLowerCase().includes('is no longer available') || raw.toLowerCase().includes('not available')) {
+            log.warn(`Model '${model}' returned deprecation notice. Trying next...`);
+            continue;
+          }
+
+          parsed = parseActionJson(raw);
+          rawVlmResponse = raw;
+          log.success(`JSON parse succeeded with 9router model '${model}' for session ${sessionId}`);
+          break;
+        } catch (routerErr: unknown) {
+          lastError = routerErr;
+          const errMsg = routerErr instanceof Error ? routerErr.message : 'Unknown 9router error';
+          log.warn(`9router model '${model}' failed: ${errMsg}. Trying next...`);
+        }
+      }
+    }
+
+    return rawVlmResponse;
+  };
+
+  const complete = resolveCompletion(providerChain);
+  let parsed: Record<string, unknown> | null = null;
+  let rawVlmResponse = '';
+  try {
+    rawVlmResponse = await complete({ sessionId, systemPrompt, userContent });
+    parsed = parseActionJson(rawVlmResponse);
+  } catch (upstreamErr) {
+    const upstreamMessage =
+      upstreamErr instanceof Error ? upstreamErr.message : 'All upstream AI models failed';
+    log.error(`All candidate models failed for session ${sessionId}: ${upstreamMessage}`);
+    logRequest({
+      sessionId,
+      timestamp: new Date().toISOString(),
+      maskedDom,
+      redactionLegend: redaction_legend ?? [],
+      returnedAction: { action: 'error' },
+    });
+    return c.json({ error: 'AI returned invalid JSON' }, 500);
+  }
+  // Reached only when the model DID answer but the text would not parse as an
+  // action. Total upstream failure is thrown by the chain and handled above, so
+  // the message here is about the parse rather than about a missing model.
   if (!parsed) {
-    const errMsg = lastError instanceof Error ? lastError.message : 'All upstream AI models failed';
-    log.error(`All candidate models failed for session ${sessionId}: ${errMsg}`);
+    log.error(
+      `Model response for session ${sessionId} was not valid action JSON ` +
+        `(first 200 chars: ${rawVlmResponse.slice(0, 200)})`
+    );
     logRequest({
       sessionId,
       timestamp: new Date().toISOString(),
