@@ -1365,7 +1365,11 @@ app.post('/api/step', async (c) => {
       redactionLegend: redaction_legend ?? [],
       returnedAction: { action: 'error' },
     });
-    return c.json({ error: 'AI returned invalid JSON' }, 500);
+    // Cycle 2.3: 502, not 500. Every candidate model failed, which is an UPSTREAM
+    // failure — 500 blames this server for something it did. The de-mirrored
+    // suite had been asserting 502 against a hand-written copy all along; the
+    // copy was right and production was wrong.
+    return c.json({ error: 'Upstream AI provider failed' }, 502);
   }
   // Reached only when the model DID answer but the text would not parse as an
   // action. Total upstream failure is thrown by the chain and handled above, so

@@ -24,7 +24,8 @@
  * Run: cd tests && npm run test -- integration/serverContract.test.ts
  */
 import { describe, it, expect, beforeAll } from 'vitest';
-import { Hono } from 'hono';
+import type { Hono } from 'hono';
+import { setCompletion } from '../../server/src/completion';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -52,92 +53,36 @@ const markdownFenced: CompletionFn = async () =>
 const chatterPrefix: CompletionFn = async () =>
   'Sure! Here is the action:\n{"action":"done"}';
 
-const TEST_SECRET = 'test-secret-key';
+// Cycle 2.4 removed the shared password. Mint a real signed token per run
+// rather than faking a header the server no longer reads.
+let TEST_SECRET = '';
 
 // ---------------------------------------------------------------------------
 // Hardened mirror of server/src/index.ts (validation ADDED, behaviour same)
 // ---------------------------------------------------------------------------
-function createTestApp(completion: CompletionFn) {
-  const app = new Hono();
-
-  app.use('*', async (c, next) => {
-    const pw = c.req.header('x-secret-password');
-    if (pw !== TEST_SECRET) return c.text('Unauthorized', 401);
-    await next();
-  });
-
-  app.post('/api/step', async (c) => {
-    let body: Record<string, unknown>;
-    try {
-      body = await c.req.json();
-    } catch {
-      return c.json({ error: 'Invalid JSON body' }, 400);
-    }
-    const { task, maskedDom, redactedImage, redaction_legend } = body as {
-      task?: unknown;
-      maskedDom?: unknown;
-      redactedImage?: unknown;
-      redaction_legend?: unknown;
-    };
-
-    // Hardened validation (production currently trusts the client and does
-    // `redaction_legend ?? []`; we accept missing legend as safe-default AND
-    // reject wrongly-typed legends — both satisfy "400 or handled safely").
-    if (typeof task !== 'string' || task.length === 0) {
-      return c.json({ error: 'Missing or invalid task' }, 400);
-    }
-    if (typeof maskedDom !== 'string') {
-      return c.json({ error: 'Missing or invalid maskedDom' }, 400);
-    }
-
-    // ZERO-TRUST SECURITY FIREWALL GATE
-    const PLACEHOLDER_STRIP = /\[[A-Z][A-Z_ ]*\]|\*{2,}/g;
-    const cleanDom = maskedDom.replace(PLACEHOLDER_STRIP, ' ');
-    if (
-      /-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----/.test(cleanDom) ||
-      /\bBearer\s+eyJ/.test(cleanDom) ||
-      /\b(?:sk-[a-zA-Z0-9_-]{20,}|AKIA[0-9A-Z]{16})\b/.test(cleanDom) ||
-      /(?<![\d-])[2-9]\d{3}[ -]\d{4}[ -]\d{4}(?![- ]?\d)/.test(cleanDom) ||
-      /\b[A-Z]{5}[0-9]{4}[A-Z]\b/.test(cleanDom)
-    ) {
-      return c.json({ error: 'UNSANITIZED_PAYLOAD_REJECTED' }, 400);
-    }
-    // redactedImage is opaque base64 to the server: missing → '', corrupt →
-    // still accepted (server just concatenates the data: header; the VLM may
-    // reject it, but Node must never crash). Only non-string types are 400.
-    let image = '';
-    if (redactedImage === undefined) image = '';
-    else if (typeof redactedImage === 'string') image = redactedImage;
-    else return c.json({ error: 'Invalid redactedImage' }, 400);
-
-    let legend: Array<{ id: string; type: string; bbox: number[] }> = [];
-    if (redaction_legend === undefined) legend = [];
-    else if (Array.isArray(redaction_legend)) {
-      legend = redaction_legend as typeof legend;
-    } else {
-      return c.json({ error: 'Invalid redaction_legend' }, 400);
-    }
-
-    // Exactly what production sends to the VLM (single header re-attach).
-    const vlmImageUrl = 'data:image/jpeg;base64,' + image;
-    void vlmImageUrl;
-
-    let raw: string;
-    try {
-      raw = await completion({ task, maskedDom, redactedImage: image, redaction_legend: legend });
-    } catch {
-      return c.json({ error: 'Upstream VLM failed' }, 502);
-    }
-
-    try {
-      const parsed = JSON.parse(raw);
-      return c.json(parsed);
-    } catch {
-      return c.json({ error: 'AI returned invalid JSON' }, 500);
-    }
-  });
-
-  return app;
+/**
+ * Cycle 2.3 — DE-MIRRORED.
+ *
+ * This used to build a hand-written copy of the server: a copied auth
+ * middleware, a copied PII firewall, a copied validation block — asserted
+ * against the copy rather than the thing that ships. Its own header said
+ * "WITHOUT importing production code (100% decoupled)".
+ *
+ * That was not decoupling, it was a second implementation. Its PII regexes had
+ * drifted from production's by nine classes, which Cycle 2.10 only discovered
+ * by driving the real route. If production auth or the firewall were deleted,
+ * this suite would have stayed green.
+ *
+ * Now the real Hono app is returned with the model call injected via
+ * `setCompletion`, so the only thing still substituted is the network boundary
+ * — which is exactly the right thing to substitute. Every call site below is
+ * unchanged: the real app exposes the same `request()` and `fetch()` surface the
+ * mirror had.
+ */
+async function createTestApp(completion: CompletionFn) {
+  setCompletion(completion);
+  const mod = await import('../../server/src/index');
+  return (mod as unknown as { app: Hono }).app;
 }
 
 /** Background Phase-8 strip (background/index.ts line ~204). */
@@ -175,16 +120,47 @@ function perfectPayload(s: Scenario) {
   };
 }
 
+/**
+ * A payload whose maskedDom is genuinely CLEAN, for tests that assert the
+ * request contract rather than the firewall.
+ *
+ * The generated scenarios carry raw synthetic PII on purpose — there is a
+ * `raw_pii_list` field whose whole job is to hold it — so a "masked" DOM derived
+ * from them still trips the server's firewall. That is CORRECT behaviour: these
+ * are unmasked secrets and the server is right to refuse them. The firewall
+ * tests below keep sending them and expect 400.
+ */
+function cleanPayload(s: Scenario) {
+  return {
+    task: s.task,
+    maskedDom: 'ISRO mission control — orbital mechanics reference table',
+    redactedImage: s.mock_image_base64,
+    redaction_legend: s.mock_redaction_legend,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // 1. Happy path
 // ---------------------------------------------------------------------------
 describe('Integration/ServerContract — Happy Path', () => {
+  beforeEach(async () => {
+    // Cycle 2.4: a real signed token, because the server no longer accepts the
+    // shared password these tests used to send.
+    const { issueToken } = await import('../../server/src/token');
+    TEST_SECRET = issueToken({
+      key: process.env.SECRETS_SIGNING_KEY ?? '',
+      subject: 'test-operator',
+      audience: 'ztai-agent',
+      ttlMs: 600_000,
+    });
+  });
+
   it('returns 200 + parsed action for a perfect payload', async () => {
-    const app = createTestApp(validClick);
+    const app = await createTestApp(validClick);
     const res = await app.request('/api/step', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-secret-password': TEST_SECRET },
-      body: JSON.stringify(perfectPayload(scenarios[0])),
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TEST_SECRET}` },
+      body: JSON.stringify(cleanPayload(scenarios[0])),
     });
     expect(res.status).toBe(200);
     const json = (await res.json()) as { action: string; selector: string };
@@ -204,7 +180,7 @@ describe('Integration/ServerContract — Happy Path', () => {
   });
 
   it('serves the contract over real HTTP (supertest smoke)', async () => {
-    const app = createTestApp(validClick);
+    const app = await createTestApp(validClick);
     const server: Server = createServer((req, res) => {
       // Bridge Node http → Hono fetch (supertest exercises real sockets).
       const url = `http://${req.headers.host}${req.url}`;
@@ -228,8 +204,8 @@ describe('Integration/ServerContract — Happy Path', () => {
       const res = await agent
         .post('/api/step')
         .set('Content-Type', 'application/json')
-        .set('x-secret-password', TEST_SECRET)
-        .send(perfectPayload(scenarios[1]));
+        .set('Authorization', `Bearer ${TEST_SECRET}`)
+        .send(cleanPayload(scenarios[1]));
       expect(res.status).toBe(200);
       expect(res.body.action).toBe('click');
     } finally {
@@ -238,24 +214,24 @@ describe('Integration/ServerContract — Happy Path', () => {
   });
 
   it('rejects wrong auth with 401 (zero-trust gate)', async () => {
-    const app = createTestApp(validClick);
+    const app = await createTestApp(validClick);
     const res = await app.request('/api/step', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-secret-password': 'wrong' },
-      body: JSON.stringify(perfectPayload(scenarios[2])),
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer wrong.token.value' },
+      body: JSON.stringify(cleanPayload(scenarios[2])),
     });
     expect(res.status).toBe(401);
   });
 
   it('rejects unmasked PII with 400 UNSANITIZED_PAYLOAD_REJECTED (firewall gate)', async () => {
-    const app = createTestApp(validClick);
+    const app = await createTestApp(validClick);
     const unmaskedPayload = {
-      ...perfectPayload(scenarios[0]),
+      ...cleanPayload(scenarios[0]),
       maskedDom: 'Leaking PAN: ABCDE1234F and Aadhaar: 2345 6789 0123',
     };
     const res = await app.request('/api/step', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-secret-password': TEST_SECRET },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TEST_SECRET}` },
       body: JSON.stringify(unmaskedPayload),
     });
     expect(res.status).toBe(400);
@@ -269,41 +245,41 @@ describe('Integration/ServerContract — Happy Path', () => {
 // ---------------------------------------------------------------------------
 describe('Integration/ServerContract — Corrupted Image Attack', () => {
   it('handles base64 WITHOUT header (the correct client form) gracefully', async () => {
-    const app = createTestApp(validClick);
-    const payload = { ...perfectPayload(scenarios[3]), redactedImage: 'iVBORw0KGgoAAAANSUhEUg==' };
+    const app = await createTestApp(validClick);
+    const payload = { ...cleanPayload(scenarios[3]), redactedImage: 'iVBORw0KGgoAAAANSUhEUg==' };
     const res = await app.request('/api/step', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-secret-password': TEST_SECRET },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TEST_SECRET}` },
       body: JSON.stringify(payload),
     });
     expect(res.status).toBe(200);
   });
 
   it('handles garbage / truncated image strings without crashing', async () => {
-    const app = createTestApp(validClick);
+    const app = await createTestApp(validClick);
     for (const garbage of ['', '!!!not-base64!!!', 'a', 'data:corrupted', '\0'.repeat(10)]) {
       const res = await app.request('/api/step', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-secret-password': TEST_SECRET },
-        body: JSON.stringify({ ...perfectPayload(scenarios[4]), redactedImage: garbage }),
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TEST_SECRET}` },
+        body: JSON.stringify({ ...cleanPayload(scenarios[4]), redactedImage: garbage }),
       });
       expect([200, 400, 500, 502]).toContain(res.status);
     }
     // Process still alive: subsequent happy request succeeds.
     const after = await app.request('/api/step', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-secret-password': TEST_SECRET },
-      body: JSON.stringify(perfectPayload(scenarios[4])),
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TEST_SECRET}` },
+      body: JSON.stringify(cleanPayload(scenarios[4])),
     });
     expect(after.status).toBe(200);
   });
 
   it('rejects non-string image types with 400 (not a crash)', async () => {
-    const app = createTestApp(validClick);
+    const app = await createTestApp(validClick);
     const res = await app.request('/api/step', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-secret-password': TEST_SECRET },
-      body: JSON.stringify({ ...perfectPayload(scenarios[5]), redactedImage: { evil: true } }),
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TEST_SECRET}` },
+      body: JSON.stringify({ ...cleanPayload(scenarios[5]), redactedImage: { evil: true } }),
     });
     expect(res.status).toBe(400);
   });
@@ -314,12 +290,12 @@ describe('Integration/ServerContract — Corrupted Image Attack', () => {
 // ---------------------------------------------------------------------------
 describe('Integration/ServerContract — Missing Legend Attack', () => {
   it('handles a missing legend safely (safe-default [], never a crash)', async () => {
-    const app = createTestApp(validClick);
-    const { redaction_legend: _drop, ...withoutLegend } = perfectPayload(scenarios[6]);
+    const app = await createTestApp(validClick);
+    const { redaction_legend: _drop, ...withoutLegend } = cleanPayload(scenarios[6]);
     void _drop;
     const res = await app.request('/api/step', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-secret-password': TEST_SECRET },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TEST_SECRET}` },
       body: JSON.stringify(withoutLegend),
     });
     // Spec allows 400 OR safe handling — our mirror safe-defaults to 200.
@@ -330,26 +306,26 @@ describe('Integration/ServerContract — Missing Legend Attack', () => {
   });
 
   it('rejects a wrongly-typed legend with 400', async () => {
-    const app = createTestApp(validClick);
+    const app = await createTestApp(validClick);
     const res = await app.request('/api/step', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-secret-password': TEST_SECRET },
-      body: JSON.stringify({ ...perfectPayload(scenarios[7]), redaction_legend: 'R1=face' }),
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TEST_SECRET}` },
+      body: JSON.stringify({ ...cleanPayload(scenarios[7]), redaction_legend: 'R1=face' }),
     });
     expect(res.status).toBe(400);
   });
 
   it('rejects missing task / maskedDom with 400', async () => {
-    const app = createTestApp(validClick);
+    const app = await createTestApp(validClick);
     const noTask = await app.request('/api/step', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-secret-password': TEST_SECRET },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TEST_SECRET}` },
       body: JSON.stringify({ maskedDom: 'x', redactedImage: '', redaction_legend: [] }),
     });
     expect(noTask.status).toBe(400);
     const noDom = await app.request('/api/step', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-secret-password': TEST_SECRET },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TEST_SECRET}` },
       body: JSON.stringify({ task: 't', redactedImage: '', redaction_legend: [] }),
     });
     expect(noDom.status).toBe(400);
@@ -360,35 +336,42 @@ describe('Integration/ServerContract — Missing Legend Attack', () => {
 // 4. Malformed AI response attack — server must 500, loop must survive
 // ---------------------------------------------------------------------------
 describe('Integration/ServerContract — Malformed AI Response Attack', () => {
-  it('markdown-fenced JSON → 500 {error}, not a crash', async () => {
-    const app = createTestApp(markdownFenced);
+  it('markdown-fenced JSON → parsed, 200 (models fence constantly)', async () => {
+    const app = await createTestApp(markdownFenced);
     const res = await app.request('/api/step', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-secret-password': TEST_SECRET },
-      body: JSON.stringify(perfectPayload(scenarios[8])),
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TEST_SECRET}` },
+      body: JSON.stringify(cleanPayload(scenarios[8])),
     });
-    expect(res.status).toBe(500);
-    expect(await res.json()).toEqual({ error: 'AI returned invalid JSON' });
+    // Production RECOVERS here: parseActionJson strips the fence and
+    // extracts the JSON, so the run continues. Asserting 500 was
+    // asserting the hand-written mirror's stricter behaviour.
+    expect(res.status).toBe(200);
+    // The recovered action, not an error: this is the behaviour that keeps a
+    // real run alive, since models wrap JSON in fences almost every turn.
+    const body = (await res.json()) as { action: string; selector: string };
+    expect(body.action).toBe('click');
+    expect(body.selector).toBe('#x');
   });
 
-  it('chatter-prefixed JSON → 500 (production demands RAW JSON only)', async () => {
-    const app = createTestApp(chatterPrefix);
+  it('chatter-prefixed JSON → JSON extracted, 200 (parseActionJson recovers it)', async () => {
+    const app = await createTestApp(chatterPrefix);
     const res = await app.request('/api/step', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-secret-password': TEST_SECRET },
-      body: JSON.stringify(perfectPayload(scenarios[9])),
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TEST_SECRET}` },
+      body: JSON.stringify(cleanPayload(scenarios[9])),
     });
-    expect(res.status).toBe(500);
+    expect(res.status).toBe(200);
   });
 
   it('upstream throw → 502, loop can retry (no unhandled rejection)', async () => {
-    const app = createTestApp(async () => {
+    const app = await createTestApp(async () => {
       throw new Error('9router down');
     });
     const res = await app.request('/api/step', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-secret-password': TEST_SECRET },
-      body: JSON.stringify(perfectPayload(scenarios[10])),
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TEST_SECRET}` },
+      body: JSON.stringify(cleanPayload(scenarios[10])),
     });
     expect(res.status).toBe(502);
   });
@@ -417,12 +400,12 @@ describe('Integration/ServerContract — Double-Base64 Regression', () => {
       seenUrl = 'data:image/jpeg;base64,' + redactedImage;
       return JSON.stringify({ action: 'done' });
     };
-    const app = createTestApp(spy);
+    const app = await createTestApp(spy);
     const stripped = stripDataUrlPrefix(scenarios[11].mock_data_url);
     const res = await app.request('/api/step', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-secret-password': TEST_SECRET },
-      body: JSON.stringify({ ...perfectPayload(scenarios[11]), redactedImage: stripped }),
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TEST_SECRET}` },
+      body: JSON.stringify({ ...cleanPayload(scenarios[11]), redactedImage: stripped }),
     });
     expect(res.status).toBe(200);
     expect(seenUrl.startsWith('data:image/jpeg;base64,')).toBe(true);

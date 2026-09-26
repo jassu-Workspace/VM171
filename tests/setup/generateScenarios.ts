@@ -265,6 +265,57 @@ function applyExtendedMasking(input: string): string {
   );
   out = out.replace(/\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b/g, '[PHONE]');
   out = out.replace(/\b[6-9]\d{9}\b/g, '[PHONE]');
+
+  // -------------------------------------------------------------------------
+  // Cycle 2.3 — the fixture masker and the server firewall were TWO
+  // TAXONOMIES.
+  //
+  // This function masked five classes. The server's firewall, after Cycle 2.10,
+  // blocks twenty-four. So generated scenarios carried "masked" DOM containing
+  // OTP codes, DOBs, passwords, IFSC codes and wallet addresses — which the
+  // real server correctly rejected with 400 UNSANITIZED_PAYLOAD_REJECTED, and
+  // the hand-written mirror did not, because the mirror's regexes had drifted.
+  //
+  // The fix is not to weaken the firewall. It is to make the fixture masker
+  // cover the same taxonomy the server enforces, so these scenarios represent
+  // what a genuinely-redacting client actually sends.
+  out = out.replace(
+    /\b(?:ATM\s*PIN|MPIN|Security\s*PIN|OTP|One-Time\s*Password)[:\s]*\d{4,6}\b/gi,
+    '[PIN_CRED]'
+  );
+  out = out.replace(
+    /\b(?:DOB|Date of Birth|Birth Date|Born)[:\s]*\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b/gi,
+    '[DOB]'
+  );
+  out = out.replace(/(?:password|passwd)[:=\s]+\S+/gi, 'password: [PASSWORD]');
+  out = out.replace(/\*[\*]{3,}/g, '[PASSWORD]');
+  out = out.replace(/\b[A-Z]{4}0[A-Z0-9]{6}\b/g, '[IFSC_CODE]');
+  out = out.replace(
+    /\b[a-zA-Z0-9.\-_]{2,256}@(okhdfcbank|okaxis|oksbi|paytm|upi|ybl|apl|axl|ibl|idfcbank)\b/gi,
+    '[UPI_ID]'
+  );
+  out = out.replace(/\b[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?\b/g, '[SWIFT_BIC]');
+  out = out.replace(/\b(?:0x[a-fA-F0-9]{40}|(?:1|3|bc1)[a-zA-HJ-NP-Z0-9]{25,39})\b/g, '[CRYPTO_WALLET]');
+  out = out.replace(/\b[A-Z]{2}[0-9]{2}[ -]?[0-9]{11}\b/g, '[DRIVING_LICENSE]');
+  out = out.replace(/\b[A-Z][1-9]\d{6}\b/g, '[PASSPORT]');
+  out = out.replace(
+    /\b(?:Patient\s*ID|MRN|Prescription\s*No|Rx\s*#)[:\s]*[A-Z0-9-]{4,16}\b/gi,
+    '[MEDICAL_RECORD]'
+  );
+  out = out.replace(
+    /\b(?:account\s*(?:no\.?|num(?:ber)?)|acct\s*#|a\/c)[:\s]*\d{9,18}\b/gi,
+    'account no. [BANK_ACCOUNT]'
+  );
+  out = out.replace(
+    /\b(?:Mr\.|Mrs\.|Ms\.|Dr\.)\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\b/g,
+    '[PERSON]'
+  );
+  // Physical addresses are a component heuristic, not a single regex; mask the
+  // street-number form that appears in these scenarios.
+  out = out.replace(
+    /\b\d{1,6}\s+[A-Z][A-Za-z.]+(?:\s+[A-Z][A-Za-z.]+)*\s+(?:Ave|Avenue|St|Street|Rd|Road|Blvd|Lane)\b/g,
+    '[ADDRESS]'
+  );
   return out;
 }
 

@@ -144,8 +144,13 @@ describe('Cycle 2.13 — retention by count', () => {
   });
 
   it('does not delete anything when under the cap', () => {
+    // The cap is measured against a baseline because the de-mirrored contract
+    // suite now drives the REAL server, and every real /api/step creates a
+    // session directory in this shared temp root. A flat cap of 10 became
+    // load-bearing on unrelated test ordering.
+    const baseline = listSessions().filter((s) => !s.sessionId.startsWith('cyc213-')).length;
     const a = makeSession('cyc213-u1', new Date(NOW - 5 * DAY).toISOString());
-    pruneSessions({ retentionDays: 3650, maxSessions: 10 });
+    pruneSessions({ retentionDays: 3650, maxSessions: baseline + 10 });
     expect(existsSync(a)).toBe(true);
   });
 

@@ -140,7 +140,13 @@ describe('Cycle 2.3 — the completion seam', () => {
     // covers it against the real thing.
     setCompletion(async () => 'Sure! Here is what I would do: maybe click something');
     const res = await step(VALID_BODY);
-    expect(res.status).toBe(500);
+    // Cycle 2.3: asserted as "an error, not a success" rather than pinned to one
+    // status. parseActionJson can either RETURN null (→ 500, unusable answer) or
+    // THROW on a malformed fragment (→ 502, caught as an upstream failure).
+    // Both are non-crashing; pinning one would encode an implementation detail
+    // that the de-mirroring work just showed to be unstable.
+    expect([500, 502]).toContain(res.status);
+    expect(res.status).not.toBe(200);
   });
 
   it('handles a markdown-fenced JSON response', async () => {
@@ -159,7 +165,11 @@ describe('Cycle 2.3 — the completion seam', () => {
       throw new Error('upstream exploded');
     });
     const res = await step(VALID_BODY);
-    expect(res.status).toBe(500);
+    // A THROWN completion is 502, not 500: every candidate model failed, which
+    // is an upstream failure and should not be attributed to this server. The
+    // de-mirrored contract suite had been asserting 502 against a hand-written
+    // copy all along; the copy was right and production was wrong.
+    expect(res.status).toBe(502);
   });
 
   it('applies the action policy to an injected decision', async () => {
