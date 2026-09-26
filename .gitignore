@@ -21,6 +21,10 @@ server/.secret
 # ─── Runtime session artifacts (contain un-redacted screenshots) ──
 storage/sessions/
 storage/*.log
+# Cycle 3.8: server_logs.jsonl holds UN-REDACTED maskedDom captures and was
+# committed with 7 real third-party email addresses (commit 8dec66fe).
+# The existing rules covered storage/*.log but not *.jsonl.
+storage/*.jsonl
 
 # ─── Logs ────────────────────────────────────────────────────────
 *.log
