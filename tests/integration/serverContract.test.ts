@@ -354,14 +354,18 @@ describe('Integration/ServerContract — Malformed AI Response Attack', () => {
     expect(body.selector).toBe('#x');
   });
 
-  it('chatter-prefixed JSON → JSON extracted, 200 (parseActionJson recovers it)', async () => {
+  it('chatter-prefixed JSON → refused, 502 (schema validation is strict)', async () => {
+    // The reply is not a valid action object, and a step that guesses at the
+    // model's intent is worse than one that reports failure so the loop can retry.
     const app = await createTestApp(chatterPrefix);
     const res = await app.request('/api/step', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TEST_SECRET}` },
       body: JSON.stringify(cleanPayload(scenarios[9])),
     });
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(502);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe('Upstream AI provider failed');
   });
 
   it('upstream throw → 502, loop can retry (no unhandled rejection)', async () => {
