@@ -9,6 +9,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import * as os from 'node:os';
 import { saveSessionStep, initSession, finalizeSession, getStorageStats, listSessions, getSessionDetails } from './sessionStorage';
+import { validateImagePayload } from './imageSafety';
 import {
   evaluateRedactionPolicy,
   recordDegradation,
@@ -964,12 +965,23 @@ app.post('/api/step', async (c) => {
     },
   ];
 
-  // Only attach redacted image if present
+  // Only attach the redacted image if present.
+  //
+  // Cycle 1.5 (N5): the label used to be hardcoded `image/jpeg` regardless of
+  // what the bytes actually were, so a PNG frame from a client was forwarded
+  // mislabelled. The MIME subtype is now derived from the magic bytes, and a
+  // declared/actual mismatch is refused rather than silently forwarded.
   if (imageBase64.trim().length > 50) {
-    userContent.push({
-      type: 'image_url',
-      image_url: { url: 'data:image/jpeg;base64,' + imageBase64 },
-    });
+    const declaredMime = 'image/jpeg';
+    const imageCheck = validateImagePayload(imageBase64, declaredMime);
+    if (!imageCheck.ok) {
+      log.warn(`[Image safety] Refusing outbound frame for ${sessionId}: ${imageCheck.error}`);
+    } else {
+      userContent.push({
+        type: 'image_url',
+        image_url: { url: `data:image/${imageCheck.format};base64,` + imageBase64 },
+      });
+    }
   }
 
   let parsed: Record<string, unknown> | null = null;
