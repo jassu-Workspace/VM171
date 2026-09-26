@@ -140,10 +140,21 @@ app.use('*', originGuard(ALLOWED_ORIGINS));
 export { app };
 
 // CORS middleware — MUST be before auth and all routes
+// Cycle 2.6: replace the wildcard with the same exact-match allowlist the
+// origin guard uses. `origin: '*'` told every browser this API was shareable —
+// the opposite of the intended posture — and let a disallowed origin read
+// responses even though the guard had already returned 403.
+//
+// `credentials: false` is deliberate: this API authenticates with an explicit
+// header, not cookies, so credentialed CORS would add ambient-authority risk
+// for no benefit. Returning `null` for a disallowed origin makes Hono omit the
+// header entirely rather than reflecting the caller's value back.
 app.use('*', cors({
-  origin: '*',
+  origin: (origin) => (origin && ALLOWED_ORIGINS.has(origin) ? origin : null),
   allowHeaders: ['Content-Type', 'x-secret-password'],
   allowMethods: ['POST', 'GET', 'OPTIONS'],
+  credentials: false,
+  maxAge: 600,
 }));
 
 // Request-logger middleware
