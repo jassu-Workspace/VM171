@@ -58,4 +58,11 @@ process.env.ALLOWED_ORIGINS =
   process.env.ALLOWED_ORIGINS ||
   'chrome-extension://test-extension-id,http://localhost:3300,http://localhost:3000';
 
+// Cycle 2.7: the body limit is read at import time. Tests need a SMALL limit so
+// an oversized-payload case is cheap to exercise; production defaults to 20 MB
+// (measured worst case is ~0.8 MB). 32 KB is enough to send a 200 KB body in a
+// unit test and still leave room for the byte-vs-character case, which needs a
+// body whose UTF-8 length exceeds the limit while its UTF-16 length does not.
+process.env.MAX_BODY_BYTES = process.env.MAX_BODY_BYTES || '32768';
+
 

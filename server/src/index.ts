@@ -11,6 +11,7 @@ import * as os from 'node:os';
 import { saveSessionStep, initSession, finalizeSession, getStorageStats, listSessions, getSessionDetails } from './sessionStorage';
 import { validateImagePayload } from './imageSafety';
 import { originGuard, parseAllowedOrigins } from './originGuard';
+import { bodyLimit } from 'hono/body-limit';
 import {
   evaluateRedactionPolicy,
   recordDegradation,
@@ -131,6 +132,25 @@ const app = new Hono();
 // pass through to auth; OPTIONS is not evaluated.
 const ALLOWED_ORIGINS = parseAllowedOrigins(process.env.ALLOWED_ORIGINS);
 app.use('*', originGuard(ALLOWED_ORIGINS));
+
+// Cycle 2.7: enforce the body limit BEFORE any handler reads a body.
+//
+// The previous implementation did `await c.req.raw.clone().text()` and then
+// compared `rawBody.length` against a byte constant. That had two defects:
+//   1. the entire body was materialised as a JS string before any size test ran,
+//      so the limit protected nothing against memory exhaustion;
+//   2. `.length` counts UTF-16 code units, not bytes, so a payload of
+//      multi-byte characters passed a limit it exceeded by 2-3x.
+// `bodyLimit` enforces on Content-Length AND during streaming, so an oversized
+// body is never fully buffered.
+const MAX_BODY_BYTES = Number(process.env.MAX_BODY_BYTES) || 20 * 1024 * 1024;
+app.use(
+  '/api/*',
+  bodyLimit({
+    maxSize: MAX_BODY_BYTES,
+    onError: (c) => c.json({ error: 'Request body exceeds the configured limit.' }, 413),
+  })
+);
 
 // Exported so tests can drive the REAL server instead of a hand-written
 // mirror. Previously the app was module-private, which meant no test could
@@ -721,18 +741,16 @@ app.post('/api/step', async (c) => {
     return c.json({ error: 'Too many requests. Please wait before retrying.' }, 429);
   }
 
-  // Payload size check (25MB limit to allow raw + masked base64 pairs safely)
-  const rawBody = await c.req.raw.clone().text();
-  const MAX_BODY_BYTES = 25 * 1024 * 1024;
-  if (rawBody.length > MAX_BODY_BYTES) {
-    log.warn(`Payload too large: ${rawBody.length} bytes from ${clientIp} — 413 returned`);
-    return c.json({ error: 'Request body exceeds 25MB limit.' }, 413);
-  }
 
-  // Parse and validate input
+  // Parse and validate input.
+  //
+  // Cycle 2.7: this used to be `JSON.parse(rawBody)` where `rawBody` came from
+  // an explicit `c.req.raw.clone().text()`. That call is gone — it buffered the
+  // whole body before the size check could reject it. `c.req.json()` reads the
+  // already-cached body, which `bodyLimit` has already bounded.
   let body: unknown;
   try {
-    body = JSON.parse(rawBody);
+    body = await c.req.json();
   } catch {
     log.warn(`Invalid JSON body from ${clientIp} — 400 returned`);
     return c.json({ error: 'Invalid JSON in request body.' }, 400);
