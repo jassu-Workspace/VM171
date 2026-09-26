@@ -12,6 +12,7 @@ import { saveSessionStep, initSession, finalizeSession, getStorageStats, listSes
 import { validateImagePayload } from './imageSafety';
 import { originGuard, parseAllowedOrigins } from './originGuard';
 import { bodyLimit } from 'hono/body-limit';
+import { getConnInfo } from '@hono/node-server/conninfo';
 import {
   evaluateRedactionPolicy,
   recordDegradation,
@@ -105,10 +106,32 @@ if (hasRouter) {
 // ---------------------------------------------------------------------------
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX_REQUESTS = 40;
+
+// Cycle 2.8: the map is BOUNDED. It used to grow without limit and only shed
+// entries when their window expired, which — combined with a client-controlled
+// bucket key — let an attacker add millions of entries in minutes. The limiter
+// was itself a memory-exhaustion vector.
+const RATE_LIMIT_MAX_ENTRIES = 10_000;
 const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
+
+/** Drop expired entries, then evict the oldest until under the cap. */
+function enforceRateLimitMapBound(): void {
+  if (rateLimitMap.size <= RATE_LIMIT_MAX_ENTRIES) return;
+  const now = Date.now();
+  for (const [key, entry] of rateLimitMap) {
+    if (now >= entry.resetAt) rateLimitMap.delete(key);
+  }
+  // Map preserves insertion order, so the first keys are the oldest.
+  while (rateLimitMap.size > RATE_LIMIT_MAX_ENTRIES) {
+    const oldest = rateLimitMap.keys().next();
+    if (oldest.done) break;
+    rateLimitMap.delete(oldest.value);
+  }
+}
 
 function checkRateLimit(ip: string): { allowed: boolean; remaining: number; resetAt: number } {
   const now = Date.now();
+  enforceRateLimitMapBound();
   const entry = rateLimitMap.get(ip);
   if (!entry || now >= entry.resetAt) {
     rateLimitMap.set(ip, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
@@ -117,6 +140,26 @@ function checkRateLimit(ip: string): { allowed: boolean; remaining: number; rese
   entry.count += 1;
   const remaining = Math.max(0, RATE_LIMIT_MAX_REQUESTS - entry.count);
   return { allowed: entry.count <= RATE_LIMIT_MAX_REQUESTS, remaining, resetAt: entry.resetAt };
+}
+
+/**
+ * The real client address, from the socket.
+ *
+ * Cycle 2.8: this used to be `c.req.header('x-forwarded-for') || 'unknown'`.
+ * X-Forwarded-For is a REQUEST HEADER — any client can set it to anything, so
+ * rotating it gave every request a fresh bucket and the limit did nothing. RED
+ * demonstrated 45 requests with 45 distinct forged addresses and not one 429.
+ *
+ * The server binds to loopback, so this is the local peer, not a proxy hop.
+ * There is no legitimate reason to honour X-Forwarded-For here.
+ */
+function clientAddress(c: unknown): string {
+  try {
+    const info = getConnInfo(c as never);
+    return info?.remote?.address ?? 'unknown';
+  } catch {
+    return 'unknown';
+  }
 }
 
 // Cycle 1.4: server-side redaction accounting. A client-supplied envelope is a
@@ -731,13 +774,16 @@ JSON Output Format:
 // ---------------------------------------------------------------------------
 app.post('/api/step', async (c) => {
   // Rate limiting
-  const clientIp = c.req.header('x-forwarded-for') || 'unknown';
+  const clientIp = clientAddress(c);
   const rateLimit = checkRateLimit(clientIp);
   if (!rateLimit.allowed) {
     log.warn(`Rate limit exceeded for IP ${clientIp} — 429 returned`);
     c.header('X-RateLimit-Limit', String(RATE_LIMIT_MAX_REQUESTS));
     c.header('X-RateLimit-Remaining', '0');
     c.header('X-RateLimit-Reset', new Date(rateLimit.resetAt).toISOString());
+    // Cycle 2.8: tell the client how long to wait instead of making it guess.
+    const retryAfterSeconds = Math.max(1, Math.ceil((rateLimit.resetAt - Date.now()) / 1000));
+    c.header('Retry-After', String(retryAfterSeconds));
     return c.json({ error: 'Too many requests. Please wait before retrying.' }, 429);
   }
 
