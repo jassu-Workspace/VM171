@@ -80,7 +80,7 @@ describe('Cycle 3.8 — the four gates that matter', () => {
   });
 });
 
-describe('Cycle 3.8 — the typecheck is advisory, not blocking', () => {
+describe('Phase 2 — the typecheck is a hard gate', () => {
   /** The body of a named job, from its 2-space-indented key to the next one. */
   function jobBody(yml: string, name: string): string {
     const start = yml.search(new RegExp(`^  ${name}:`, 'm'));
@@ -92,24 +92,23 @@ describe('Cycle 3.8 — the typecheck is advisory, not blocking', () => {
   }
 
   it('runs the extension typecheck', () => {
-    // BREAK: deleting the job entirely, which would hide the 74-error debt
-    // instead of tracking it.
+    // BREAK: deleting the job entirely, which would remove the typecheck gate.
     const yml = workflow();
     expect(yml).toContain('typecheck');
     expect(jobBody(yml, 'typecheck')).toMatch(/npm run typecheck/);
   });
 
-  it('does not let an extension typecheck failure fail the workflow', () => {
-    // BREAK: promoting the advisory job to blocking while 74 errors remain.
-    // A permanently red gate is worse than none: it teaches people to ignore
-    // red, and it masks the gates that do matter.
+  it('is a blocking gate (does not continue on error)', () => {
+    // BREAK: re-adding continue-on-error to make the typecheck advisory again.
+    // The 74 errors that made it advisory are fixed, and a gate that can never
+    // fail is not a gate. If the count returns, the fix is to fix the errors,
+    // NOT to re-add continue-on-error.
     //
-    // The check is on the JOB's own `continue-on-error`, not on the file text.
-    // A substring search over the whole file is satisfied by the word appearing
-    // in a comment — which is exactly the false pass this had before.
+    // The check is on the JOB's own body, ensuring neither the job nor its steps
+    // specify `continue-on-error: true`.
     const yml = workflow();
     const body = jobBody(yml, 'typecheck');
-    expect(body).toMatch(/continue-on-error:\s*true/);
+    expect(body).not.toMatch(/continue-on-error:\s*true/);
   });
 
   it('is not a hard dependency of any other job', () => {

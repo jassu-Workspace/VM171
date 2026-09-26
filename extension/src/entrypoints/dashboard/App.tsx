@@ -288,16 +288,21 @@ const App: React.FC = () => {
 
   /* Live session feed: listen for LOG_UPDATE from background */
   useEffect(() => {
-    const listener = (message: { type?: string; payload?: unknown }) => {
-      if (message?.type === 'LOG_UPDATE' && typeof message.payload === 'string') {
+    const listener = (rawMessage: unknown) => {
+      const parsed = LogUpdateMessageSchema.safeParse(rawMessage);
+      if (!parsed.success) {
+        return;
+      }
+      const message = parsed.data;
+      if (message.type === 'LOG_UPDATE') {
         const stamped = `[${new Date().toLocaleTimeString()}] ${message.payload}`;
         setLogs((prev) => [...prev.slice(-199), stamped]);
       }
     };
-    browser.runtime.onMessage.addListener(listener as never);
+    browser.runtime.onMessage.addListener(listener);
     return () => {
       try {
-        browser.runtime.onMessage.removeListener(listener as never);
+        browser.runtime.onMessage.removeListener(listener);
       } catch {
         /* ignore */
       }

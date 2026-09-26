@@ -2,6 +2,15 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { browser, type Runtime } from 'wxt/browser';
 import { useTheme } from '../../utils/theme';
 import { ThemeToggle } from '../../components/ThemeToggle';
+import {
+  SidepanelMessageSchema,
+  type Milestone,
+  type Candidate,
+  type ScratchpadData,
+  type AgentActivityData,
+} from '../../types/messages';
+
+export type { Milestone, Candidate, ScratchpadData, AgentActivityData };
 
 export interface AuditPageResponse {
   success: boolean;
@@ -14,64 +23,6 @@ export interface AuditPageResponse {
   legend?: Array<{ id: string; type: string; bbox: number[] }>;
   image?: string;
   error?: string;
-}
-
-export interface Milestone {
-  id: number;
-  name: string;
-  status: 'pending' | 'in_progress' | 'completed';
-}
-
-export interface Candidate {
-  title: string;
-  price?: string;
-  rating?: string;
-  verdict: 'rejected' | 'candidate_matched';
-  rejectionReason?: string;
-}
-
-export interface ScratchpadData {
-  originalGoal?: string;
-  hardConstraints?: string[];
-  softPreferences?: string[];
-  milestones?: Milestone[];
-  activeMilestoneIndex?: number;
-  evaluatedCandidates?: Candidate[];
-  extractedItems?: Array<{ title?: string; id?: string; details?: string; sourceUrl?: string }>;
-  verificationGate?: {
-    satisfied: boolean;
-    matchedTitle?: string;
-    matchedPrice?: string;
-    matchedRating?: string;
-    summary?: string;
-  };
-  workflowGate?: {
-    actionConfirmed: boolean;
-    confirmationText?: string;
-  };
-  reflection?: string;
-}
-
-export interface AgentActivityData {
-  step: number;
-  maxSteps: number;
-  phase: 'Scanning' | 'Redacting' | 'Thinking' | 'Executing' | 'Backtracking' | 'Complete' | 'Idle' | 'Aborted';
-  thought?: string;
-  action?: string;
-  targetLabel?: string;
-  value?: string;
-  statusText?: string;
-  evaluatedCount: number;
-  rejectedCount: number;
-  matchedCount: number;
-  rejectionReasons: string[];
-  activeMilestone?: string;
-  summary?: string;
-  taskMode?: 'shopping' | 'workflow' | 'info';
-  actionCount?: number;
-  completedMilestonesCount?: number;
-  totalMilestonesCount?: number;
-  isGoalVerified?: boolean;
 }
 
 const App: React.FC = () => {
@@ -227,34 +178,29 @@ const App: React.FC = () => {
   // Listen for runtime messages (LOG_UPDATE, SCRATCHPAD_UPDATE, AGENT_STATUS, AGENT_ACTIVITY)
   useEffect(() => {
     const messageListener = (
-      message: unknown,
+      rawMessage: unknown,
       _sender: Runtime.MessageSender
     ) => {
-      if (
-        !message ||
-        typeof message !== 'object' ||
-        !('type' in message) ||
-        typeof message.type !== 'string'
-      ) {
+      const parsed = SidepanelMessageSchema.safeParse(rawMessage);
+      if (!parsed.success) {
         return;
       }
-      const payload = 'payload' in message ? message.payload : undefined;
-      if (message.type === 'LOG_UPDATE' && typeof payload === 'string') {
-        setLogs((prev) => [...prev, payload]);
-        if (payload.includes('✅ Task Complete!') || payload.includes('Aborting') || payload.includes('Agent loop error')) {
+      const message = parsed.data;
+      if (message.type === 'LOG_UPDATE') {
+        setLogs((prev) => [...prev, message.payload]);
+        if (message.payload.includes('✅ Task Complete!') || message.payload.includes('Aborting') || message.payload.includes('Agent loop error')) {
           setIsRunning(false);
         }
-      } else if (message.type === 'SCRATCHPAD_UPDATE' && payload) {
-        setScratchpad(payload as ScratchpadData);
+      } else if (message.type === 'SCRATCHPAD_UPDATE') {
+        setScratchpad(message.payload ?? null);
       } else if (message.type === 'AGENT_STATUS') {
-        const status = (payload as { isRunning?: boolean } | undefined)?.isRunning;
+        const status = message.payload?.isRunning;
         if (typeof status === 'boolean') {
           setIsRunning(status);
         }
-      } else if (message.type === 'AGENT_ACTIVITY' && payload) {
-        const activity = payload as AgentActivityData;
-        setAgentActivity(activity);
-        if (activity.phase === 'Complete' || activity.phase === 'Aborted') {
+      } else if (message.type === 'AGENT_ACTIVITY') {
+        setAgentActivity(message.payload);
+        if (message.payload.phase === 'Complete' || message.payload.phase === 'Aborted') {
           setIsRunning(false);
         }
       }

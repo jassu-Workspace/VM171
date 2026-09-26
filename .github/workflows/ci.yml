@@ -328,18 +328,20 @@ jobs:
           kill "$SERVER_PID" 2>/dev/null || true
 
   # ─────────────────────────────────────────────────────────────────────────
-  # 6. ADVISORY. Reports the extension typecheck debt without blocking.
+  # 6. Typecheck. NOW A HARD GATE.
   #
-  # 74 errors, catalogued in Cycle 3.5. This job exists so the number is
-  # visible and trending toward zero — not so the build is red forever.
+  # This was advisory with 74 errors outstanding. Those are fixed: 0 errors,
+  # and the fix declared real types rather than suppressing the checks.
+  # verify_repo_hygiene.mjs asserted this file carried
+  # `continue-on-error: true`; that assertion is updated below, because a
+  # permanently-red gate trains people to ignore red, and this one is green.
   #
-  # TO MAKE THIS A HARD GATE: fix the errors, then delete the
-  # `continue-on-error: true` line below. That is the whole change.
+  # TO REVERT: put `continue-on-error: true` back and silence the hygiene
+  # check. Do not do that to make a red build pass — fix the errors.
   # ─────────────────────────────────────────────────────────────────────────
   typecheck:
-    name: Typecheck (advisory — extension)
+    name: Typecheck (extension)
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
