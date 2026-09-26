@@ -13,6 +13,7 @@ import { validateImagePayload } from './imageSafety';
 import { originGuard, parseAllowedOrigins } from './originGuard';
 import { bodyLimit } from 'hono/body-limit';
 import { StepSchema } from './schemas';
+import { parseActionResponse } from './responseSchema';
 import { evaluateAction } from './actionPolicy';
 import { resolveCompletion } from './completion';
 import type { CompletionFn } from './completionTypes';
@@ -1109,25 +1110,13 @@ app.post('/api/step', async (c) => {
   // Log payload sizes
   log.info(`Step ${step} [${sessionId}] — task: ${task.length} chars, maskedDom: ${maskedDom.length} chars, redactedImage: ${imageBase64.length} chars, rawImage: ${typeof rawImage === 'string' ? rawImage.length : 0} chars, history: ${actionHistory.length} items`);
 
-  function parseActionJson(text: string): Record<string, unknown> {
-    let cleaned = text.trim();
-    if (cleaned.startsWith('```')) {
-      cleaned = cleaned.replace(/^```(?:json)?\s*\n?/i, '').replace(/\n?```\s*$/i, '').trim();
-    }
-    // Bug 8: Strip trailing commas before closing braces/brackets e.g. {"a": 1,} or [1, 2,]
-    const sanitizeJson = (str: string) => str.replace(/,\s*([\]}])/g, '$1');
-    try {
-      return JSON.parse(sanitizeJson(cleaned));
-    } catch {
-      const firstBrace = cleaned.indexOf('{');
-      const lastBrace = cleaned.lastIndexOf('}');
-      if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
-        const extracted = cleaned.slice(firstBrace, lastBrace + 1);
-        return JSON.parse(sanitizeJson(extracted));
-      }
-      throw new Error('AI returned invalid JSON');
-    }
-  }
+  // Phase 3: the model reply is now schema-validated, exactly as the request
+  // already was. The previous implementation stripped markdown fences,
+  // searched for the first '{' and last '}', removed trailing commas, and
+  // parsed whatever survived — rescuing malformed output rather than
+  // constraining it, and the result flows straight into the action performed
+  // on a web page. See responseSchema.ts for the full reasoning.
+  const parseActionJson = parseActionResponse;
 
   const domain = classifyTaskDomain(task, maskedDom);
   const taskMode = domain === 'SHOPPING_COMPARISON' ? 'shopping' : domain === 'WORKFLOW_ACTION' ? 'workflow' : (domain === 'ISRO_ENTERPRISE_OPERATIONS' || domain === 'GEOSPATIAL_WORKFLOW') ? 'isro' : 'info';
