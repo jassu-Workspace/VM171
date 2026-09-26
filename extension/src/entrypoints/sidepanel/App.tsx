@@ -1,7 +1,20 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { browser, Browser } from 'wxt/browser';
+import { browser, type Runtime } from 'wxt/browser';
 import { useTheme } from '../../utils/theme';
 import { ThemeToggle } from '../../components/ThemeToggle';
+
+export interface AuditPageResponse {
+  success: boolean;
+  url?: string;
+  title?: string;
+  timestamp?: number;
+  totalSensitiveCount?: number;
+  categoryCounts?: Record<string, number>;
+  regions?: Array<{ id: string; type: string; text: string }>;
+  legend?: Array<{ id: string; type: string; bbox: number[] }>;
+  image?: string;
+  error?: string;
+}
 
 export interface Milestone {
   id: number;
@@ -129,7 +142,7 @@ const App: React.FC = () => {
         tabId = tabs[0]?.id;
       }
       if (!tabId) return;
-      const res = await browser.tabs.sendMessage(tabId, { type: 'AUDIT_PAGE' });
+      const res = await browser.tabs.sendMessage<unknown, AuditPageResponse>(tabId, { type: 'AUDIT_PAGE' });
       if (res && res.success) {
         setAuditResult(res);
         setActiveTabSection('inspector');
@@ -214,24 +227,32 @@ const App: React.FC = () => {
   // Listen for runtime messages (LOG_UPDATE, SCRATCHPAD_UPDATE, AGENT_STATUS, AGENT_ACTIVITY)
   useEffect(() => {
     const messageListener = (
-      message: { type: string; payload?: unknown },
-      _sender: Browser.runtime.MessageSender,
-      _sendResponse: (response?: unknown) => void
+      message: unknown,
+      _sender: Runtime.MessageSender
     ) => {
-      if (message.type === 'LOG_UPDATE' && typeof message.payload === 'string') {
-        setLogs((prev) => [...prev, message.payload as string]);
-        if (message.payload.includes('✅ Task Complete!') || message.payload.includes('Aborting') || message.payload.includes('Agent loop error')) {
+      if (
+        !message ||
+        typeof message !== 'object' ||
+        !('type' in message) ||
+        typeof message.type !== 'string'
+      ) {
+        return;
+      }
+      const payload = 'payload' in message ? message.payload : undefined;
+      if (message.type === 'LOG_UPDATE' && typeof payload === 'string') {
+        setLogs((prev) => [...prev, payload]);
+        if (payload.includes('✅ Task Complete!') || payload.includes('Aborting') || payload.includes('Agent loop error')) {
           setIsRunning(false);
         }
-      } else if (message.type === 'SCRATCHPAD_UPDATE' && message.payload) {
-        setScratchpad(message.payload as ScratchpadData);
+      } else if (message.type === 'SCRATCHPAD_UPDATE' && payload) {
+        setScratchpad(payload as ScratchpadData);
       } else if (message.type === 'AGENT_STATUS') {
-        const status = (message.payload as { isRunning?: boolean })?.isRunning;
+        const status = (payload as { isRunning?: boolean } | undefined)?.isRunning;
         if (typeof status === 'boolean') {
           setIsRunning(status);
         }
-      } else if (message.type === 'AGENT_ACTIVITY' && message.payload) {
-        const activity = message.payload as AgentActivityData;
+      } else if (message.type === 'AGENT_ACTIVITY' && payload) {
+        const activity = payload as AgentActivityData;
         setAgentActivity(activity);
         if (activity.phase === 'Complete' || activity.phase === 'Aborted') {
           setIsRunning(false);

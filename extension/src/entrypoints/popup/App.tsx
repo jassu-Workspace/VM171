@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { browser, Browser } from 'wxt/browser';
+import { browser, type Runtime } from 'wxt/browser';
 import { useTheme } from '../../utils/theme';
 import { ThemeToggle } from '../../components/ThemeToggle';
 
@@ -22,13 +22,21 @@ const App: React.FC = () => {
   // Listen for LOG_UPDATE messages
   useEffect(() => {
     const messageListener = (
-      message: { type: string; payload: string },
-      _sender: Browser.runtime.MessageSender,
-      _sendResponse: (response?: unknown) => void
+      message: unknown,
+      _sender: Runtime.MessageSender
     ) => {
-      if (message.type === 'LOG_UPDATE') {
-        setLogs((prevLogs) => [...prevLogs, message.payload]);
-        if (message.payload.includes('✅ Task Complete!') || message.payload.includes('Aborting') || message.payload.includes('Agent loop error')) {
+      if (
+        !message ||
+        typeof message !== 'object' ||
+        !('type' in message) ||
+        typeof message.type !== 'string'
+      ) {
+        return;
+      }
+      const payload = 'payload' in message ? message.payload : undefined;
+      if (message.type === 'LOG_UPDATE' && typeof payload === 'string') {
+        setLogs((prevLogs) => [...prevLogs, payload]);
+        if (payload.includes('✅ Task Complete!') || payload.includes('Aborting') || payload.includes('Agent loop error')) {
           setIsRunning(false);
         }
       }

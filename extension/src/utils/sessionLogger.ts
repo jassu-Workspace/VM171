@@ -45,6 +45,10 @@ export interface AgentSession {
   returnedActions: Array<{ type: string; selector?: string; id?: string; value?: string }>;
 }
 
+function isAgentSessionArray(val: unknown): val is AgentSession[] {
+  return Array.isArray(val);
+}
+
 export class SessionLogger {
   private static readonly STORAGE_KEY = 'agent_sessions';
 
@@ -53,7 +57,8 @@ export class SessionLogger {
     try {
       // Fetch existing sessions
       const existing = await browser.storage.local.get(SessionLogger.STORAGE_KEY);
-      let sessions: AgentSession[] = existing[SessionLogger.STORAGE_KEY] ?? [];
+      const stored = existing[SessionLogger.STORAGE_KEY];
+      let sessions: AgentSession[] = isAgentSessionArray(stored) ? stored : [];
 
       // Append session
       sessions.push(session);
@@ -87,7 +92,8 @@ export class SessionLogger {
   static async getSessions(): Promise<AgentSession[]> {
     try {
       const existing = await browser.storage.local.get(SessionLogger.STORAGE_KEY);
-      return existing[SessionLogger.STORAGE_KEY] ?? [];
+      const stored = existing[SessionLogger.STORAGE_KEY];
+      return isAgentSessionArray(stored) ? stored : [];
     } catch {
       return [];
     }

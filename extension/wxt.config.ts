@@ -5,8 +5,9 @@ export default defineConfig({
   srcDir: 'src',
   modules: [],
   dev: {
-    port: 3300,
-    open: false,
+    server: {
+      port: 3300,
+    },
   },
   // Entrypoints (auto-discovered by WXT):
   //  - src/entrypoints/background  → MV3 service worker (telemetry engine)
