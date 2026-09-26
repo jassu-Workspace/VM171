@@ -6,6 +6,7 @@
 import { browser } from 'wxt/browser';
 import * as ort from 'onnxruntime-web';
 import { generateSessionId, SessionLogger, AgentSession } from '../../utils/sessionLogger';
+import { resolveCaptureSource } from '../../utils/captureProvenance';
 import { detectUIElements, getUIStatus, checkModelAvailability } from '../../utils/onnxEngine';
 import { getOcrStatus, checkOcrAvailability } from '../../utils/ocrEngine';
 
@@ -878,9 +879,13 @@ async function runAgentLoop(task: string, tabId: number): Promise<void> {
         },
       });
 
-      let rawImage = '';
-      let redactedImage = '';
+      let archivalRawImage = '';
+      let outboundImage = '';
       let redaction_legend: Array<{ id: string; type: string; bbox: number[] }> = [];
+      let redactionState: 'verified' | 'degraded' | 'unavailable' = 'unavailable';
+      let degradedReason: string | null = null;
+      let directCaptureForArchive: string | null = null;
+
       try {
         const screenshotResponse = await Promise.race([
           browser.tabs.sendMessage(tabId, {
@@ -889,58 +894,80 @@ async function runAgentLoop(task: string, tabId: number): Promise<void> {
           new Promise<null>((res) => setTimeout(() => res(null), 12000)),
         ]);
 
-        if (screenshotResponse && screenshotResponse.success && screenshotResponse.image) {
-          // Strip the data-URL prefix — the server expects raw base64 and
-          // re-attaches 'data:image/jpeg;base64,' itself before calling the VLM.
-          redactedImage = screenshotResponse.image.replace(/^data:image\/\w+;base64,/, '');
-          if (screenshotResponse.rawImage) {
-            rawImage = screenshotResponse.rawImage.replace(/^data:image\/\w+;base64,/, '');
-          }
-          // Store the redaction legend returned with the screenshot.
-          redaction_legend = screenshotResponse.legend || [];
-          lastRedactedImage = redactedImage;
+        if (screenshotResponse?.success) {
+          directCaptureForArchive = null;
+          // Cycle 1.3: single tested decision point for frame selection.
+          // `image` is outbound-only and is populated solely from the content
+          // script; a raw direct capture can never land there.
+          const resolution = resolveCaptureSource({
+            contentScript: {
+              ok: true,
+              image: screenshotResponse.image,
+              rawImage: screenshotResponse.rawImage,
+              legend: screenshotResponse.legend,
+              redaction: screenshotResponse.redaction,
+            },
+            direct: { available: false, capture: null },
+          });
+
+          outboundImage = resolution.image ?? '';
+          archivalRawImage = resolution.archivalImage ?? '';
+          redaction_legend = resolution.legend;
+          redactionState = resolution.redactionState;
+          degradedReason = resolution.degradedReason;
+          lastRedactedImage = outboundImage;
         }
       } catch (error) {
         console.warn('Content script GET_SCREENSHOT error:', error);
       }
 
-      // FAIL-SAFE BULLETPROOF RAW CAPTURE:
-      // If content script timed out or failed to return rawImage, capture directly via service worker
-      // so raw-images/ is NEVER missed under any circumstances!
-      if (!rawImage && typeof browser?.tabs?.captureVisibleTab === 'function') {
+      // ARCHIVAL-ONLY FALLBACK (Cycle 1.3): if the content script produced no
+      // raw frame, capture directly via the service worker so raw-images/ is
+      // never missed. This capture is UN-REDACTED and is therefore archived
+      // locally only — it must never become the outbound image. Previously
+      // this was enforced by the `if (!redactedImage)` guard further down;
+      // that separation is now explicit and unit-tested.
+      if (!archivalRawImage && typeof browser?.tabs?.captureVisibleTab === 'function') {
         try {
           const directCapture = await browser.tabs.captureVisibleTab(null, {
             format: 'jpeg',
             quality: 70,
           });
           if (directCapture) {
-            rawImage = directCapture.replace(/^data:image\/\w+;base64,/, '');
-            console.log(`📸 [Bulletproof Capture] Fallback direct capture succeeded for Step ${step}`);
+            archivalRawImage = directCapture.replace(/^data:image\/\w+;base64,/, '');
+            directCaptureForArchive = archivalRawImage;
+            console.log(`📸 [Archive Fallback] Direct capture archived (not sent) for Step ${step}`);
           }
         } catch (captureErr) {
-          console.warn(`[Bulletproof Capture] Direct captureVisibleTab fallback failed:`, captureErr);
+          console.warn(`[Archive Fallback] Direct captureVisibleTab failed:`, captureErr);
         }
       }
 
-      // Zero-Trust Fallback: If content script redaction timed out or failed, NEVER send unredacted screen to the cloud.
-      // Gracefully proceed with DOM-first perception where all PII is already masked on the client.
-      if (!redactedImage) {
+      // Zero-Trust: with no verified frame, the step proceeds DOM-only. The
+      // degraded state is recorded so the dashboard and operator can see that
+      // the run lost its visual channel.
+      if (!outboundImage) {
         safeSendMessage({
           type: 'LOG_UPDATE',
           payload: `Step ${step}: Visual frame unavailable or timed out. Proceeding with DOM-first perception.`,
         });
-        redactedImage = '';
+        if (redactionState !== 'unavailable') {
+          redactionState = 'degraded';
+        }
+        degradedReason =
+          degradedReason ??
+          'No outbound frame: content script produced no redacted image.';
         lastRedactedImage = '';
       }
 
-      // VLM Visual Frame: The exact image payload transmitted to the VLM (local or hosted)
-      const vlmImage = redactedImage || '';
+      // VLM Visual Frame: the exact image payload transmitted to the VLM.
+      const vlmImage = outboundImage || '';
 
       // Step D: Local UI Vision via ONNX — runLocalUIVision(image)
       let uiElements: Array<{ type: string; bbox: number[] }> = [];
       try {
         const uiStart = Date.now();
-        uiElements = await runLocalUIVision(redactedImage);
+        uiElements = await runLocalUIVision(outboundImage);
         lastInferenceMs = Date.now() - uiStart;
         if (uiElements.length > 0) {
           safeSendMessage({ type: 'LOG_UPDATE', payload: `Local CV processed. Detected ${uiElements.length} UI element(s).` });
@@ -965,19 +992,21 @@ async function runAgentLoop(task: string, tabId: number): Promise<void> {
       });
       safeSendMessage({ type: 'LOG_UPDATE', payload: `Step ${step}: PII redacted locally. Querying hybrid VLM...` });
 
-      // Step F: Fetch the AI decision from the server (task, maskedDom, redactedImage, redaction_legend, scratchpad, sessionId, step, rawImage, subTasks, actionHistory, vlmImage)
+      // Step F: Fetch the AI decision from the server. `outboundImage` is the
+      // redacted frame; `archivalRawImage` is local-only and is stored, not sent
+      // to the model as a trusted image.
       let aiDecision;
       try {
         const roundTripStart = Date.now();
         aiDecision = await callServer(
           task,
           maskedText,
-          redactedImage,
+          outboundImage,
           redaction_legend,
           currentScratchpad,
           sessionId,
           step,
-          rawImage,
+          archivalRawImage,
           subTasks,
           actionHistory.slice(-8),
           vlmImage
@@ -985,7 +1014,7 @@ async function runAgentLoop(task: string, tabId: number): Promise<void> {
         // Telemetry: record latency, request count, and outbound payload size.
         telemetryData.lastLatency = Date.now() - roundTripStart;
         telemetryData.apiCalls += 1;
-        trackPayloadSent(maskedText, redactedImage);
+        trackPayloadSent(maskedText, outboundImage);
       } catch (error) {
         const errMsg = error instanceof Error ? error.message : 'Unknown error';
         safeSendMessage({ type: 'LOG_UPDATE', payload: `Step ${step}: Server connection failed (${errMsg}). Aborting loop.` });

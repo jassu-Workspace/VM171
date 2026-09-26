@@ -83,6 +83,19 @@ export interface VerificationResult {
   reasons: string[];
 }
 
+/**
+ * Prefix on the single violation the verifier raises when detection never ran.
+ *
+ * `classifyVerification` keys off this prefix to tell "we could not check"
+ * apart from "we checked and found a problem". A reworded message would
+ * silently reclassify degraded frames as blocks (or, far worse, blocks as
+ * degraded), so the marker is a shared constant and `frameDisposition.test.ts`
+ * pins the contract.
+ */
+export const DETECTION_UNAVAILABLE_MARKER = 'Detection unavailable:';
+
+export type FrameDisposition = 'release-verified' | 'release-degraded' | 'block';
+
 export function isLuhnValid(cardStr: string): boolean {
   const digits = cardStr.replace(/\D/g, '');
   if (digits.length < 13 || digits.length > 19) return false;
@@ -195,7 +208,7 @@ export function runSecurityBoundaryVerification(
   }
 
   if (!detectionAvailable) {
-    violations.push(`Detection unavailable: ${detectionReason}`);
+    violations.push(`${DETECTION_UNAVAILABLE_MARKER} ${detectionReason}`);
   }
 
   // 1. Geometric Enclosure Verification
@@ -281,4 +294,38 @@ export function runSecurityBoundaryVerification(
     },
     reasons,
   };
+}
+
+/**
+ * Decide what to do with a verified frame.
+ *
+ * Three outcomes, and the middle one is the whole point of Cycle 1.2:
+ *
+ *   release-verified  detection ran, all checks passed
+ *   release-degraded  detection never ran; nothing is proven to be leaking,
+ *                     but nothing is proven safe either. Release it, and label
+ *                     it, rather than pretending or blocking.
+ *   block             a genuine leak was proven: a coverage gap, residual
+ *                     plaintext PII, or a below-threshold region. Never
+ *                     releasable, degraded or not.
+ *
+ * The classification is driven by the violation list, not by `passed` alone,
+ * because `passed` is false for both degraded and blocked frames.
+ */
+export function classifyVerification(result: VerificationResult): FrameDisposition {
+  const violations = result.jsonSanitizationCheck.violations;
+
+  const substantive = violations.filter((v) => !v.startsWith(DETECTION_UNAVAILABLE_MARKER));
+  if (substantive.length > 0) {
+    return 'block';
+  }
+
+  if (violations.length > 0) {
+    // The availability marker is the only complaint: unknown, not leaky.
+    return 'release-degraded';
+  }
+
+  // No violations at all. `passed` is authoritative here — it also folds in the
+  // coverage and confidence checks.
+  return result.passed ? 'release-verified' : 'block';
 }

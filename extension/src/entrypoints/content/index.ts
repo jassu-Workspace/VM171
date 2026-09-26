@@ -20,6 +20,7 @@ import {
 } from '../../utils/addressDetector';
 import {
   runSecurityBoundaryVerification,
+  classifyVerification,
   isLuhnValid,
   SAFE_TOKENS,
   stripOwnMasks,
@@ -2428,9 +2429,22 @@ export async function captureAndRedact(): Promise<{
     { detectionAvailable, engineLoaded: faceEngineLive, reason: detectionReason }
   );
 
-  if (!verification.passed) {
+  const disposition = classifyVerification(verification);
+
+  // Cycle 1.2: only a PROVEN leak blocks. An unscanned frame is unknown, not
+  // leaky — it is released but labelled, so the background, the dashboard and
+  // the operator all learn the run degraded instead of silently receiving an
+  // un-redacted frame in a field called `redactedImage`.
+  if (disposition === 'block') {
     console.error('[Sentinel] Security boundary verification failed:', verification.reasons);
     throw new Error(`FAIL_CLOSED_VERIFICATION_ERROR: ${verification.reasons.join('; ')}`);
+  }
+
+  if (disposition === 'release-degraded') {
+    console.warn(
+      '[Sentinel] Releasing DEGRADED frame — detection did not run, so redaction is unproven:',
+      verification.detectionCheck.reason
+    );
   }
 
   // 5) Build the redaction legend, assigning each redaction a unique ID
@@ -2440,11 +2454,20 @@ export async function captureAndRedact(): Promise<{
     bbox: redaction.bbox,
   }));
 
-  // 6) Return both the pre-redaction raw screenshot and the redacted frame as base64 plus redaction legend
+  // 6) Return both the pre-redaction raw screenshot and the redacted frame as base64
+  // plus redaction legend, and an explicit provenance envelope so no downstream
+  // consumer has to infer trust from a variable name.
   return {
     rawImage: screenshotDataUrl,
     image: canvas.toDataURL('image/jpeg', 0.7),
     legend: redaction_legend,
+    redaction: {
+      state: disposition === 'release-verified' ? 'verified' : 'degraded',
+      engine: faceEngineLive ? 'mediapipe' : 'unavailable',
+      degradedAt: disposition === 'release-degraded' ? new Date().toISOString() : null,
+      reason: verification.detectionCheck.reason,
+      violations: verification.jsonSanitizationCheck.violations,
+    },
   };
 }
 
