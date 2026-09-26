@@ -26,6 +26,7 @@ import {
   stripOwnMasks,
 } from '../../utils/leakVerifier';
 import { buildElementMeta, sanitizeAttribute, DEFAULT_VALUE_CAP } from '../../utils/outboundText';
+import { prepareOutboundText } from '../../utils/untrustedContent';
 import {
   evaluateTextPII,
   isIdCardGeometry,
@@ -397,7 +398,31 @@ export function getMaskedDom(): string {
     .map((el) => `[${el.id}] <${el.tag}${el.meta ? ' ' + el.meta : ''}> ${(el.text || '(empty input)').slice(0, 140).replace(/\s+/g, ' ')}`)
     .join('\n');
 
-  const fullMaskedText = `${systemBanner}--- INTERACTIVE ELEMENTS (Target these with "id" or "selector": "[data-agent-id='id']") ---\n${interactiveSummary}\n\n--- PAGE TEXT ---\n${maskedText.slice(0, 8000)}`;
+  // Cycle 1.7: `interactiveSummary` and `maskedText` are both page-derived, so
+  // both are untrusted. Neutralise imperative spans to auditable tags, then
+  // delimit the region so the model is told it is data rather than instruction.
+  //
+  // `systemBanner` is agent-authored and trusted, so it stays OUTSIDE the
+  // delimiters — wrapping it would mislabel our own instruction as untrusted
+  // page content and undercut the signal.
+  //
+  // This is a QUALITY control (fewer derailed steps, less wasted context, an
+  // audit trail). It is NOT the injection defence: regex neutralisation is
+  // bypassable by rephrasing, which is why the server-side action policy
+  // (Cycle 3.1) is the actual boundary between the model and executeAction.
+  const { text: untrustedBody, audit: untrustedAudit } = prepareOutboundText(
+    `--- INTERACTIVE ELEMENTS (Target these with "id" or "selector": "[data-agent-id='id']") ---\n${interactiveSummary}\n\n--- PAGE TEXT ---\n${maskedText.slice(0, 8000)}`,
+    'page-content'
+  );
+  if (untrustedAudit.length > 0) {
+    console.warn(
+      `[Untrusted content] Neutralised ${untrustedAudit.length} imperative span(s) from page text:`,
+      untrustedAudit
+    );
+  }
+  lastNeutralizedCount = untrustedAudit.length;
+
+  const fullMaskedText = `${systemBanner}${untrustedBody}`;
 
   // Return JSON string with masked text, element map, and submission confirmation flag
   return JSON.stringify({
@@ -429,6 +454,11 @@ function escapeHtml(str: string): string {
 
 // Global map linking visual redaction legend IDs (R1, R2...) to DOM agent-ids (agent-1, agent-2...)
 const lastRedactionLegendMap = new Map<string, string>();
+
+// Cycle 1.7: how many imperative spans the last getMaskedDom() neutralised.
+// Surfaced to the dashboard so a page attempting to steer the agent is
+// visible to the operator rather than silently succeeding.
+let lastNeutralizedCount = 0;
 
 function findElementByKeyword(keyword: string): Element | null {
   const lower = keyword.toLowerCase().trim();
