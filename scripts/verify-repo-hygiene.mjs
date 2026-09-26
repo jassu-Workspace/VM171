@@ -121,6 +121,12 @@ const SECRET_PATTERNS = [
 ];
 const isTestFile = (f) =>
   /(^|\/)(tests?|__tests__)\//.test(f) || /\.(test|spec)\.[cm]?[jt]sx?$/.test(f);
+// The gate scripts themselves. They MUST contain the literal secret patterns —
+// that is their entire job — and the comments explaining the calibration
+// name real canaries such as AWS's own AKIAIOSFODNN7EXAMPLE. Without this
+// exclusion the gate flags itself on every run, and a gate that always
+// fails is a gate nobody reads.
+const isGateScript = (f) => /^scripts\/verify-.*\.mjs$/.test(f);
 const TEXTUAL = /\.(ts|tsx|js|mjs|cjs|json|yml|yaml|md|env|example|txt)$/;
 let scanned = 0;
 let skippedTests = 0;
@@ -130,6 +136,7 @@ for (const file of tracked) {
     skippedTests += 1;
     continue;
   }
+  if (isGateScript(file)) continue;
   const full = join(ROOT, file);
   if (!existsSync(full) || !statSync(full).isFile()) continue;
   if (statSync(full).size > 2 * 1024 * 1024) continue;

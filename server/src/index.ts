@@ -1585,18 +1585,60 @@ app.onError((err, c) => {
 // Start server
 const port = Number(process.env.PORT) || 3000;
 
+// ---------------------------------------------------------------------------
+// LOOPBACK-ONLY BINDING  (Cycle 3.9)
+//
+// `.env.example` documented `HOST=127.0.0.1` with the note "The server must
+// never be reachable off-box" — and HOST was never read. `serve()` was called
+// with no hostname, so Node bound every interface and the server answered on
+// the machine's LAN address. Verified on a real boot.
+//
+// Authentication was never bypassed: an unauthenticated request still got a
+// 401. So this is defense in depth, not an open door. But anything on the same
+// network segment could reach the pairing endpoint, and the pairing code is
+// the only credential in the design. `originGuard` does not help here — a
+// direct request from another machine carries no Origin header to guard.
+//
+// The posture is ENFORCED, not merely documented: a non-loopback HOST is
+// refused and logged rather than silently honoured. Otherwise one edited line
+// of configuration would quietly undo the whole control, and nothing would
+// say so.
+// ---------------------------------------------------------------------------
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', 'localhost', '[::1]']);
+
+function resolveBindHost(): string {
+  const configured = (process.env.HOST ?? '').trim();
+  if (!configured) return '127.0.0.1';
+  if (LOOPBACK_HOSTS.has(configured.toLowerCase())) return configured;
+  log.warn(
+    `HOST="${configured}" is not a loopback address and was REFUSED. ` +
+      'This server holds a bearer-token auth surface and must never be ' +
+      'reachable off-box. Binding 127.0.0.1 instead.',
+  );
+  return '127.0.0.1';
+}
+
+const bindHost = resolveBindHost();
+
 let server: any = null;
 if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
   server = serve({
     fetch: app.fetch,
     port,
+    hostname: bindHost,
   });
 
   log.success('═══════════════════════════════════════════════════════════');
   log.success('  🚀  Zero-Trust AI Agent Server — ONLINE');
   log.success('═══════════════════════════════════════════════════════════');
-  log.info(`  Port:              ${port}`);
-  log.info(`  CORS:              enabled (origin: *)`);
+  log.info(`  Bind:              ${bindHost}:${port}  (loopback only)`);
+  // This line said `origin: *`, which was true before Cycle 2.6 and has been
+  // false since. A boot banner that misreports the security posture is worse
+  // than no banner: an operator reading it would believe CORS was wide open.
+  log.info(
+    `  CORS:              allowlist (${ALLOWED_ORIGINS.size} origin(s)); ` +
+      'disallowed Origin is refused with 403',
+  );
   log.info(`  Upstream Provider: ${hasGemini ? 'Google Gemini API (Priority 1)' : '9router (Priority 2)'}`);
   log.info(`  Auth header:       x-secret-password`);
   log.info(`  Rate limit:        ${RATE_LIMIT_MAX_REQUESTS} req/min per IP`);
