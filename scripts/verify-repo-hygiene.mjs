@@ -197,6 +197,65 @@ for (const entry of unexpectedLarge) {
 }
 note(`vendored models: ${(blobBytes / 1024 / 1024).toFixed(1)} MB (intentional, keeps builds offline)`);
 
+// ── 7. Launcher script consistency (STATIC lint, not a behaviour test) ──────
+//
+// s.ps1 and extension/171s.ps1 cannot be executed here: there is no PowerShell
+// on Linux, and neither script has ever been run in CI. So this is explicitly
+// a STATIC check and is labelled as such wherever it is relied on. It is worth
+// having anyway, because both scripts had rotted against the code for a long
+// time and nothing noticed:
+//
+//   - s.ps1 demanded ROUTER_URL + ROUTER_API_KEY, rejecting valid Gemini-only
+//     setups, because the server accepts EITHER provider.
+//   - 171s.ps1 validated no environment at all and declared success two seconds
+//     after launch, over a server that had already exited.
+//   - 171s.ps1 used Register-EngineEvent on PowerShell.Exiting, which a
+//     console Ctrl+C never raises, so its cleanup was unreachable code.
+//   - Neither mentioned pairing, so the extension could not be authenticated.
+//
+// What this catches is drift away from the current design: a marker below is
+// something that was true once and is now false.
+const PS1_FILES = ['s.ps1', 'extension/171s.ps1'];
+const STALE_MARKERS = [
+  { re: /origin:\s*\*/, why: 'CORS is an allowlist since Cycle 2.6, not *' },
+  { re: /Auth header:\s*x-secret-password/i, why: 'that header is refused on purpose' },
+  { re: /SECRETS_PAIRING_CODE\s+is\s+required/i, why: 'it is optional; a code is generated' },
+];
+// Paths a launcher must be able to find. A launcher that points at a directory
+// this repo does not have cannot work, and it fails on someone else's machine.
+const REQUIRED_PATHS = ['server', 'extension', 'scripts/verify-repo-hygiene.mjs', 'scripts/verify-bundle.mjs'];
+for (const rel of PS1_FILES) {
+  const full = join(ROOT, rel);
+  if (!existsSync(full)) {
+    fail(`launcher script missing: ${rel}`);
+    continue;
+  }
+  const text = readFileSync(full, 'utf8');
+  for (const { re, why } of STALE_MARKERS) {
+    if (re.test(text)) fail(`${rel} still asserts something false: ${why}`);
+  }
+  // Every launcher must tell the operator how to pair, or the extension cannot
+  // authenticate. This is the check that would have caught the original rot.
+  if (!/pairing/i.test(text)) {
+    fail(`${rel} never mentions pairing — the extension cannot authenticate without it`);
+  }
+  if (!/SECRET_PASSWORD/.test(text)) {
+    fail(`${rel} does not check SECRET_PASSWORD, which the server requires to boot`);
+  }
+  // Must not blindly kill whatever holds the port.
+  if (/Get-NetTCPConnection[\s\S]{0,400}?taskkill/.test(text) && !/isOurs|unrelated/.test(text)) {
+    fail(`${rel} appears to force-kill any process on the port without checking what it is`);
+  }
+}
+for (const rel of REQUIRED_PATHS) {
+  const referenced = PS1_FILES.some((f) => {
+    const full = join(ROOT, f);
+    return existsSync(full) && readFileSync(full, 'utf8').includes(rel.split('/').pop());
+  });
+  if (!referenced) note(`no launcher references ${rel}`);
+}
+note(`static lint of ${PS1_FILES.length} launcher script(s); NOT executed (no PowerShell on Linux)`);
+
 // ── Report ───────────────────────────────────────────────────────────────────
 for (const n of notes) console.log(`[hygiene] note: ${n}`);
 
