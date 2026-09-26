@@ -28,6 +28,7 @@
  * These tests drive the REAL exported app.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
+import { authHeader } from '../setup/authHelper';
 
 type AppLike = { request: (input: string, init?: RequestInit) => Promise<Response> };
 
@@ -43,7 +44,7 @@ beforeAll(async () => {
 function post(extraHeaders: Record<string, string> = {}) {
   return app.request('http://localhost/api/step', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-secret-password': SECRET, ...extraHeaders },
+    headers: { 'Content-Type': 'application/json', ...authHeader(), ...extraHeaders },
     body: JSON.stringify({ task: 't', maskedDom: 'd' }),
   });
 }

@@ -25,6 +25,7 @@
  * These tests drive the REAL exported app.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
+import { authHeader } from '../setup/authHelper';
 
 type AppLike = { request: (input: string, init?: RequestInit) => Promise<Response> };
 
@@ -40,7 +41,7 @@ beforeAll(async () => {
 
 async function telemetry() {
   const res = await app.request('http://localhost/api/system-telemetry', {
-    headers: { 'x-secret-password': SECRET, Origin: ALLOWED },
+    headers: { ...authHeader(), Origin: ALLOWED },
   });
   return { status: res.status, body: (await res.json()) as Record<string, unknown> };
 }

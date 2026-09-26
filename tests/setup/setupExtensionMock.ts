@@ -51,7 +51,16 @@ if (typeof (globalThis as any).PointerEvent === 'undefined') {
   (globalThis as any).PointerEvent = MockPointerEvent;
 }
 
+// Cycle 2.4: the shared password is no longer a credential. The server now
+// issues signed bearer tokens; the legacy `x-secret-password` header is
+// rejected on purpose. SECRET_PASSWORD is retained ONLY so the Cycle 1.8
+// logger-redaction tests have a realistic secret to prove it never gets logged.
 process.env.SECRET_PASSWORD = process.env.SECRET_PASSWORD || 'test-secret-password';
+
+// A KNOWN signing key and pairing code, so tests can mint valid tokens. In
+// normal operation both are generated per process and never leave the console.
+process.env.SECRETS_SIGNING_KEY = process.env.SECRETS_SIGNING_KEY || 'test-signing-key-0123456789abcdefghijklmno';
+process.env.SECRETS_PAIRING_CODE = process.env.SECRETS_PAIRING_CODE || 'test-pairing-code-0123456789';
 
 // Cycle 2.5: the server reads ALLOWED_ORIGINS at import time, and setup files
 // run before test modules, so this must be set here — not inside a test file —

@@ -27,6 +27,7 @@
  * These tests drive the REAL exported app.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
+import { authHeader } from '../setup/authHelper';
 
 type AppLike = { request: (input: string, init?: RequestInit) => Promise<Response> };
 
@@ -43,7 +44,7 @@ beforeAll(async () => {
 async function postMaskedDom(maskedDom: string) {
   const res = await app.request('http://localhost/api/step', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-secret-password': SECRET, Origin: ALLOWED },
+    headers: { 'Content-Type': 'application/json', ...authHeader(), Origin: ALLOWED },
     body: JSON.stringify({
       task: 'check the page',
       maskedDom,

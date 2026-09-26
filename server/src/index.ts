@@ -13,6 +13,16 @@ import { validateImagePayload } from './imageSafety';
 import { originGuard, parseAllowedOrigins } from './originGuard';
 import { bodyLimit } from 'hono/body-limit';
 import { StepSchema } from './schemas';
+import {
+  issueToken,
+  verifyToken,
+  generateSigningKey,
+  generatePairingCode,
+  isPairingCodeValid,
+  TokenError,
+  DEFAULT_TTL_MS,
+  DEFAULT_AUDIENCE,
+} from './token';
 // Cycle 2.10: the multi-component address heuristic lives with the extension
 // because that is where the element context it reasons about is collected.
 // Imported rather than duplicated ON PURPOSE: a second copy of a security
@@ -179,6 +189,25 @@ const redactionTally: DegradationTally = createDegradationTally();
 
 const app = new Hono();
 
+// ---------------------------------------------------------------------------
+//  Cycle 2.4 — BEARER TOKEN AUTHENTICATION (replaces the shared password)
+// ---------------------------------------------------------------------------
+// The old credential was a PUBLIC LITERAL: '141207' was hardcoded in the
+// extension source and shipped inside the built bundle, so anyone who unpacked
+// the extension held a working credential for the local server.
+//
+// Replaced with a per-process random HS256 signing key plus a one-time pairing
+// code. Both are generated here and never written to the repository. The
+// pairing code is printed once for the operator; the extension exchanges it for
+// a short-lived signed token which it keeps in chrome.storage.local.
+//
+// SECRETS_PAIRING_CODE exists so an automated harness can supply a known code.
+// It is never expected to be set in normal operation.
+const TOKEN_SIGNING_KEY =
+  process.env.SECRETS_SIGNING_KEY || generateSigningKey();
+const PAIRING_CODE =
+  process.env.SECRETS_PAIRING_CODE || generatePairingCode();
+
 // Cycle 2.5 (finding #3, CRITICAL): exact-match origin allowlist, registered
 // BEFORE CORS and BEFORE auth so a disallowed origin is refused before any
 // credential is examined. Requests with no Origin (curl, tests, Playwright)
@@ -244,19 +273,72 @@ app.use('*', async (c, next) => {
 });
 
 // Auth middleware — after CORS and request logger
+/**
+ * POST /api/auth/pair — exchange the one-time pairing code for a signed token.
+ *
+ * Registered AFTER the origin guard, so a web page cannot reach it: handing a
+ * token to any site that asks would undo the entire cycle. No credential of its
+ * own is required, because the pairing code IS the credential.
+ */
+app.post('/api/auth/pair', async (c) => {
+  let code = '';
+  try {
+    const body = (await c.req.json()) as { code?: unknown };
+    code = typeof body.code === 'string' ? body.code : '';
+  } catch {
+    return c.json({ error: 'Invalid JSON body.' }, 400);
+  }
+
+  if (!isPairingCodeValid(code, PAIRING_CODE)) {
+    log.warn('Pairing attempt rejected — invalid code');
+    return c.json({ error: 'Invalid pairing code.' }, 401);
+  }
+
+  const token = issueToken({
+    key: TOKEN_SIGNING_KEY,
+    subject: 'local-operator',
+    audience: DEFAULT_AUDIENCE,
+    ttlMs: DEFAULT_TTL_MS,
+  });
+
+  log.success('Extension paired — issued a bearer token.');
+  return c.json({ token, expiresIn: DEFAULT_TTL_MS });
+});
+
+// ── Auth middleware ────────────────────────────────────────────────
+// Registered AFTER /api/auth/pair, which is deliberately the only
+// unauthenticated route: it is how a token is first obtained. Everything below
+// this line requires a valid bearer token.
 app.use('*', async (c, next) => {
   // CORS preflight bypass
   if (c.req.method === 'OPTIONS') {
     return await next();
   }
 
-  const expected = process.env.SECRET_PASSWORD;
-  const received = c.req.header('x-secret-password');
+  // Cycle 2.4: bearer token only.
+  //
+  // The legacy `x-secret-password` header is NO LONGER ACCEPTED, deliberately.
+  // Leaving it working would keep the literal in every shipped bundle a live
+  // credential, and this cycle would have added a second way in while fixing
+  // none of the problem.
+  const authorization = c.req.header('authorization') ?? '';
+  const match = /^Bearer\s+(\S+)$/.exec(authorization);
 
-  if (received !== expected) {
-    log.warn(`Unauthorized request — bad/missing x-secret-password`);
+  if (!match) {
+    log.warn('Unauthorized request — missing or malformed bearer token');
     return c.text('Unauthorized', 401);
   }
+
+  try {
+    verifyToken(match[1], { key: TOKEN_SIGNING_KEY, audience: DEFAULT_AUDIENCE });
+  } catch (err) {
+    // The reason is logged locally and never returned to the client: telling an
+    // attacker "expired" versus "bad signature" is a free oracle.
+    const reason = err instanceof TokenError ? err.reason : 'unknown';
+    log.warn(`Unauthorized request — token rejected (${reason})`);
+    return c.text('Unauthorized', 401);
+  }
+
   await next();
 });
 

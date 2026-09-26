@@ -5,6 +5,11 @@
 
 declare module 'node:crypto' {
   export function randomUUID(): string;
+  export function randomBytes(size: number): Buffer;
+  export function createHmac(alg: string, key: string | Buffer): {
+    update(data: string): { digest(enc: string): string };
+  };
+  export function timingSafeEqual(a: Uint8Array, b: Uint8Array): boolean;
 }
 
 declare module 'node:fs' {

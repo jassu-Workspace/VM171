@@ -21,6 +21,7 @@
  *   - a top-level side effect (serve/exit) firing during a test run
  */
 import { describe, it, expect, beforeAll } from 'vitest';
+import { authHeader } from '../setup/authHelper';
 
 type AppLike = { request: (input: string, init?: RequestInit) => Promise<Response> };
 
@@ -54,7 +55,7 @@ describe('Cycle 1.4 — real server module loads and exposes its API', () => {
   it('answers GET /health with the secret', async () => {
     // BREAK: the health route being renamed or removed.
     const res = await app.request('http://localhost/health', {
-      headers: { 'x-secret-password': process.env.SECRET_PASSWORD ?? '' },
+      headers: { ...authHeader() },
     });
     expect(res.status).toBe(200);
   });
@@ -83,7 +84,7 @@ describe('Cycle 1.4 — real server module loads and exposes its API', () => {
   it('answers GET /api/system-telemetry with a redaction section', async () => {
     // BREAK: the Cycle 1.4 telemetry block being dropped by a later refactor.
     const res = await app.request('http://localhost/api/system-telemetry', {
-      headers: { 'x-secret-password': process.env.SECRET_PASSWORD ?? '' },
+      headers: { ...authHeader() },
     });
     expect(res.status).toBe(200);
     const body = (await res.json()) as { redaction?: { policy?: string } };

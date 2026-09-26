@@ -29,6 +29,7 @@
  * These tests drive the REAL exported app.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
+import { authHeader } from '../setup/authHelper';
 
 type AppLike = { request: (input: string, init?: RequestInit) => Promise<Response> };
 
