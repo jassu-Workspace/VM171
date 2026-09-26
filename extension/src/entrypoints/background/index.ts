@@ -7,6 +7,7 @@ import { browser } from 'wxt/browser';
 import * as ort from 'onnxruntime-web';
 import { generateSessionId, SessionLogger, AgentSession } from '../../utils/sessionLogger';
 import { resolveCaptureSource } from '../../utils/captureProvenance';
+import { sendToTab, type ActionDecision } from '../../utils/messaging';
 import { getAgentConfig, authHeadersFor, isAllowedServerUrl, DEFAULT_SERVER_URL } from '../../utils/config';
 import { detectUIElements, getUIStatus, checkModelAvailability } from '../../utils/onnxEngine';
 import { getOcrStatus, checkOcrAvailability } from '../../utils/ocrEngine';
@@ -381,7 +382,7 @@ async function ensureContentScriptInjected(tabId: number, maxRetries = 5): Promi
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
       // Ping the content script — if it responds, it's already loaded.
-      const response = await browser.tabs.sendMessage(tabId, { type: 'PING' });
+      const response = await sendToTab(browser, tabId, 'PING');
       if (response && response.success) {
         return true;
       }
@@ -403,7 +404,7 @@ async function ensureContentScriptInjected(tabId: number, maxRetries = 5): Promi
   }
 
   try {
-    const response = await browser.tabs.sendMessage(tabId, { type: 'PING' });
+    const response = await sendToTab(browser, tabId, 'PING');
     return !!(response && response.success);
   } catch {
     return false;
@@ -843,9 +844,7 @@ async function runAgentLoop(task: string, tabId: number): Promise<void> {
       let domFetchSuccess = false;
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
-          const domResponse = await browser.tabs.sendMessage(tabId, {
-            type: 'GET_DOM',
-          });
+          const domResponse = await sendToTab(browser, tabId, 'GET_DOM');
 
           if (domResponse && domResponse.success && domResponse.data) {
             const domData = JSON.parse(domResponse.data);

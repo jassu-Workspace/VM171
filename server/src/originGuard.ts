@@ -62,7 +62,17 @@ export function isOriginAllowed(origin: string, allowed: ReadonlySet<string>): b
  * origin is refused before any credential is examined.
  */
 export function originGuard(allowed: ReadonlySet<string>) {
-  return async function originGuardMiddleware(c: Context, next: Next): Promise<void> {
+  // The return type is `Response | void`, not `void`: a middleware that
+  // short-circuits must RETURN the Response. An earlier version annotated this
+  // `Promise<void>` and used `await c.json(...)`, which does not finalise the
+  // context — every rejection surfaced as 500 "Context is not finalized"
+  // instead of 403. The compiler caught the inconsistency when `strict` and a
+  // working tsconfig arrived, which is precisely the class of mistake it
+  // exists to prevent.
+  return async function originGuardMiddleware(
+    c: Context,
+    next: Next
+  ): Promise<Response | void> {
     if (c.req.method === 'OPTIONS') {
       await next();
       return;

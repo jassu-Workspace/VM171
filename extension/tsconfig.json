@@ -1,17 +1,39 @@
+// Extension TypeScript config — Cycle 3.6
+//
+// This config previously COULD NOT BE USED AT ALL. Three separate faults, each
+// fatal on its own:
+//   - `lib: [..., "DOMIterable"]` — not a valid lib name; it is `DOM.Iterable`
+//   - `resolveExtensions` — not a tsc option (removed in TS 5)
+//   - the referenced `tsconfig.node.json` lacked `composite: true`
+//
+// tsc aborted while reading the config, before opening a single source file. That
+// is why nothing in this repository had ever been type-checked, and why a
+// structurally-valid mistake in Cycle 2.4 — an auth middleware nested inside a
+// route handler, which made every protected route return 200 — reached the
+// suite instead of the compiler.
+//
+// `strict` is now enabled. The server project has had it all along; this project
+// did not, across roughly 4,500 lines of content-script and background code.
 {
   "compilerOptions": {
     "target": "ES2020",
     "useDefineForClassFields": true,
-    "lib": ["ES2020", "DOM", "DOMIterable"],
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
     "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
     "skipLibCheck": true,
     "esModuleInterop": true,
-    "allowImportingTsExtensions": true,
-    "resolveExtensions": [
-      ".ts",
-      ".tsx"
-    ]
+    "allowSyntheticDefaultImports": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+
+    "strict": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "wxt.config.ts"],
-  "references": [{ "path": "./tsconfig.node.json" }]
+  "include": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.d.ts", "wxt.config.ts"],
+  "exclude": ["node_modules", ".output", ".wxt", "tests"]
 }
