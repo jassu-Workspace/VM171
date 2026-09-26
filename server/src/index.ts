@@ -278,33 +278,50 @@ app.get('/health', (c) => {
 });
 
 /**
- * LIVE SYSTEM TELEMETRY API
- * Exposes real host memory, CPU, process uptime, and storage disk statistics
- * for the Mission Control dashboard.
+ * LIVE SYSTEM TELEMETRY API — Mission Control dashboard.
+ *
+ * Cycle 2.11: this used to return cpuModel, cpuCount, loadAvg, platform, arch
+ * and the full memory breakdown to anyone holding the secret. Individually
+ * unremarkable; together a precise hardware-and-OS fingerprint. And until
+ * Cycle 2.5 closed the origin hole, this endpoint was readable from ANY web
+ * page — with a secret that was a public literal in the extension bundle.
+ *
+ * The default response now carries only what an operator needs to decide
+ * something: is it alive, how long has it been up, how much work has it done,
+ * and is redaction degrading. Fingerprint fields move behind
+ * TELEMETRY_VERBOSE (off by default) for local debugging.
  */
+const TELEMETRY_VERBOSE =
+  String(process.env.TELEMETRY_VERBOSE ?? '').toLowerCase() === 'true';
+
 app.get('/api/system-telemetry', (c) => {
-  const totalMem = os.totalmem();
-  const freeMem = os.freemem();
-  const usedMem = totalMem - freeMem;
-  const memUsagePercent = Number(((usedMem / totalMem) * 100).toFixed(1));
-  const cpus = os.cpus();
   const procMem = process.memoryUsage();
   const storageStats = getStorageStats();
+
+  // Operational only by default: process liveness and work done.
+  const system: Record<string, unknown> = { cpuCount: os.cpus().length };
+
+  if (TELEMETRY_VERBOSE) {
+    // Host fingerprint — opt-in, local debugging only. Documented in
+    // server/.env.example as a field that should stay off in any deployment
+    // where the endpoint could be reached by anyone but the operator.
+    const totalMem = os.totalmem();
+    const freeMem = os.freemem();
+    const usedMem = totalMem - freeMem;
+    system.totalMemBytes = totalMem;
+    system.freeMemBytes = freeMem;
+    system.usedMemBytes = usedMem;
+    system.memUsagePercent = Number(((usedMem / totalMem) * 100).toFixed(1));
+    system.cpuModel = os.cpus()[0]?.model || 'Standard CPU';
+    system.loadAvg = os.loadavg();
+    system.platform = os.platform();
+    system.arch = os.arch();
+  }
 
   return c.json({
     status: 'online',
     timestamp: new Date().toISOString(),
-    system: {
-      totalMemBytes: totalMem,
-      freeMemBytes: freeMem,
-      usedMemBytes: usedMem,
-      memUsagePercent,
-      cpuCount: cpus.length,
-      cpuModel: cpus[0]?.model || 'Standard CPU',
-      loadAvg: os.loadavg(),
-      platform: os.platform(),
-      arch: os.arch(),
-    },
+    system,
     process: {
       uptimeSeconds: Math.floor(process.uptime()),
       heapUsedBytes: procMem.heapUsed,
@@ -323,7 +340,10 @@ app.get('/api/system-telemetry', (c) => {
         : (process.env.MODEL_NAME || 'ag/gemini-3.7-flash-high'),
     },
     // Cycle 1.4: a run that quietly lost its visual channel must be visible to
-    // the operator rather than passing unnoticed.
+    // the operator rather than passing unnoticed. This stays in the DEFAULT
+    // response — it is the reason the endpoint is worth calling at all, and
+    // dropping it alongside the fingerprint fields would make a degraded run
+    // invisible again.
     redaction: {
       policy: REJECT_UNREDACTED ? 'reject-unredacted' : 'accept-and-record',
       degradedSteps: redactionTally.degradedSteps,
