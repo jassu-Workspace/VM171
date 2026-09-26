@@ -1,2 +1,0 @@
-Milestone 1: agent-31
-Milestone 2: agent-10

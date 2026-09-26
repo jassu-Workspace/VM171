@@ -1,0 +1,47 @@
+# ─── Dependencies ────────────────────────────────────────────────
+node_modules/
+
+# ─── Build output ────────────────────────────────────────────────
+extension/.output/
+extension/.wxt/
+.wxt/
+dist/
+build/
+*.tsbuildinfo
+
+# ─── Secrets — NEVER commit ──────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+server/.secret
+
+# ─── Runtime session artifacts (contain un-redacted screenshots) ──
+storage/sessions/
+storage/*.log
+
+# ─── Logs ────────────────────────────────────────────────────────
+*.log
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ─── Python / notebooks ──────────────────────────────────────────
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# ─── Test artifacts ──────────────────────────────────────────────
+coverage/
+tests/fixtures/mock_scenarios_150.json
+
+# ─── OS / editor ─────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
