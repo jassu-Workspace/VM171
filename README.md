@@ -554,4 +554,4 @@ ISO/IEC 7810/7812, ISO 27001/27701.
 Released under the **MIT License**.
 
 > Built with ❤️ for **Smart India Hackathon 2026** · Problem Statement 26171 (ISRO).
-> See `ZERO_TRUST_AI_WEB_AGENT_SPECIFICATION.md` for the full technical whitepaper and `SIH_MASTER_GUIDE.md` for the operational manual.
+> See `ZERO_TRUST_AI_WEB_AGENT_SPECIFICATION.md` for the full technical whitepaper and `SIH_MASTER_GUIDE.md` for the operational manual.# VM171
