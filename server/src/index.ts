@@ -9,6 +9,13 @@ import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import * as os from 'node:os';
 import { saveSessionStep, initSession, finalizeSession, getStorageStats, listSessions, getSessionDetails } from './sessionStorage';
+import {
+  evaluateRedactionPolicy,
+  recordDegradation,
+  createDegradationTally,
+  type RedactionEnvelopeInput,
+  type DegradationTally,
+} from './redactionPolicy';
 
 // Minimal Node process typing
 declare const process: {
@@ -97,7 +104,19 @@ function checkRateLimit(ip: string): { allowed: boolean; remaining: number; rese
   return { allowed: entry.count <= RATE_LIMIT_MAX_REQUESTS, remaining, resetAt: entry.resetAt };
 }
 
+// Cycle 1.4: server-side redaction accounting. A client-supplied envelope is a
+// claim, never ground truth — see redactionPolicy.ts.
+const REJECT_UNREDACTED = String(process.env.REJECT_UNREDACTED ?? '').toLowerCase() === 'true';
+const redactionTally: DegradationTally = createDegradationTally();
+
 const app = new Hono();
+
+// Exported so tests can drive the REAL server instead of a hand-written
+// mirror. Previously the app was module-private, which meant no test could
+// import it (it also calls process.exit()/serve() at import time) and
+// tests/integration/serverContract.test.ts re-implemented the server by hand.
+// See tests/integration/realServerModule.test.ts.
+export { app };
 
 // CORS middleware — MUST be before auth and all routes
 app.use('*', cors({
@@ -197,6 +216,15 @@ app.get('/api/system-telemetry', (c) => {
       model: hasGemini
         ? (process.env.GEMINI_MODEL || 'gemini-2.5-flash')
         : (process.env.MODEL_NAME || 'ag/gemini-3.7-flash-high'),
+    },
+    // Cycle 1.4: a run that quietly lost its visual channel must be visible to
+    // the operator rather than passing unnoticed.
+    redaction: {
+      policy: REJECT_UNREDACTED ? 'reject-unredacted' : 'accept-and-record',
+      degradedSteps: redactionTally.degradedSteps,
+      unavailableSteps: redactionTally.unavailableSteps,
+      worstState: redactionTally.worstState,
+      lastDegradedReason: redactionTally.lastDegradedReason,
     },
   });
 });
@@ -690,6 +718,7 @@ app.post('/api/step', async (c) => {
     vlmImage,
     subTasks: clientSubTasks,
     actionHistory: clientActionHistory,
+    redaction: clientRedaction,
   } = body as Record<string, unknown>;
 
   if (typeof task !== 'string' || task.trim().length === 0) {
@@ -738,6 +767,23 @@ app.post('/api/step', async (c) => {
       error: 'UNSANITIZED_PAYLOAD_REJECTED',
       detail: `Security firewall rejected unmasked PII in payload: ${firewallViolation}`,
     }, 400);
+  }
+
+  // Cycle 1.4: treat the client's redaction envelope as a CLAIM. The server
+  // decides policy, and accounts for every step that was not verified.
+  const redactionVerdict = evaluateRedactionPolicy(
+    clientRedaction as RedactionEnvelopeInput | undefined,
+    REJECT_UNREDACTED
+  );
+  if (!redactionVerdict.accepted) {
+    log.warn(`[Redaction policy] Rejected step ${step} from ${clientIp}: ${redactionVerdict.error}`);
+    return c.json({ error: redactionVerdict.error }, redactionVerdict.status as 400);
+  }
+  if (redactionVerdict.degraded) {
+    recordDegradation(redactionTally, clientRedaction as RedactionEnvelopeInput | undefined);
+    log.warn(
+      `[Redaction policy] Step ${step} accepted DEGRADED (${redactionVerdict.state}): ${redactionVerdict.degradedReason}`
+    );
   }
 
   // Log payload sizes
