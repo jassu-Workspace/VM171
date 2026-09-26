@@ -3,7 +3,7 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { serve } from '@hono/node-server';
 import OpenAI from 'openai';
-import { logRequest, createRedactor, setRedactor, redactForLog } from './logger';
+import { logRequest, createRedactor, setRedactor, redactForLog, log, getLogFormat, formatLogEntry } from './logger';
 import { randomUUID } from 'node:crypto';
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -83,20 +83,33 @@ setRedactor(
   })
 );
 
-const log = {
-  info(msg: string): void {
-    console.log(`${COLORS.cyan}[${ts()}] ℹ INFO${COLORS.reset}  ${redactForLog(msg)}`);
-  },
-  success(msg: string): void {
-    console.log(`${COLORS.green}[${ts()}] ✔ SUCCESS${COLORS.reset} ${redactForLog(msg)}`);
-  },
-  warn(msg: string): void {
-    console.warn(`${COLORS.yellow}[${ts()}] ⚠ WARN${COLORS.reset}  ${redactForLog(msg)}`);
-  },
-  error(msg: string): void {
-    console.error(`${COLORS.red}[${ts()}] ✖ ERROR${COLORS.reset} ${redactForLog(msg)}`);
-  },
-};
+function parseNumericEnv(
+  key: string,
+  defaultValue: number,
+  options?: { min?: number; max?: number; integer?: boolean }
+): number {
+  const raw = process.env[key];
+  if (raw === undefined || raw.trim() === '') {
+    return defaultValue;
+  }
+  const parsed = Number(raw.trim());
+  const min = options?.min ?? 1;
+  const max = options?.max ?? Number.MAX_SAFE_INTEGER;
+  const integer = options?.integer ?? true;
+
+  if (
+    !Number.isFinite(parsed) ||
+    parsed < min ||
+    parsed > max ||
+    (integer && !Number.isInteger(parsed))
+  ) {
+    log.warn(
+      `Invalid ${key}="${raw}". Expected ${integer ? 'an integer' : 'a number'} between ${min} and ${max}. Falling back to default (${defaultValue}).`
+    );
+    return defaultValue;
+  }
+  return parsed;
+}
 
 // ---------------------------------------------------------------------------
 //  ENV VALIDATION ON STARTUP
@@ -128,8 +141,8 @@ if (hasRouter) {
 // ---------------------------------------------------------------------------
 //  RATE LIMITER (in-memory, per-IP)
 // ---------------------------------------------------------------------------
-const RATE_LIMIT_WINDOW_MS = 60_000;
-const RATE_LIMIT_MAX_REQUESTS = 40;
+const RATE_LIMIT_WINDOW_MS = parseNumericEnv('RATE_LIMIT_WINDOW_MS', 60_000, { min: 1 });
+const RATE_LIMIT_MAX_REQUESTS = parseNumericEnv('RATE_LIMIT_MAX_REQUESTS', 40, { min: 1 });
 
 // Cycle 2.8: the map is BOUNDED. It used to grow without limit and only shed
 // entries when their window expired, which — combined with a client-controlled
@@ -223,7 +236,8 @@ const ALLOWED_ORIGINS = parseAllowedOrigins(process.env.ALLOWED_ORIGINS);
 // Declared ahead of the wire trace below so the trace can report the threshold
 // a rejected body was measured against. Same value, same env var, same
 // default as the `bodyLimit` registration further down — do not fork it.
-const MAX_BODY_BYTES = Number(process.env.MAX_BODY_BYTES) || 20 * 1024 * 1024;
+const MAX_BODY_BYTES = parseNumericEnv('MAX_BODY_BYTES', 20 * 1024 * 1024, { min: 1 });
+const MAX_STEPS = parseNumericEnv('MAX_STEPS', 35, { min: 1 });
 
 // ── WIRE TRACE (diagnostic, opt-in) ─────────────────────────────────────────
 // TEMPORARY. Registered FIRST — above originGuard, bodyLimit, CORS and the
@@ -1002,11 +1016,11 @@ app.post('/api/step', async (c) => {
   // Rate limiting
   const clientIp = clientAddress(c);
   const rateLimit = checkRateLimit(clientIp);
+  c.header('X-RateLimit-Limit', String(RATE_LIMIT_MAX_REQUESTS));
+  c.header('X-RateLimit-Remaining', String(rateLimit.remaining));
+  c.header('X-RateLimit-Reset', new Date(rateLimit.resetAt).toISOString());
   if (!rateLimit.allowed) {
     log.warn(`Rate limit exceeded for IP ${clientIp} — 429 returned`);
-    c.header('X-RateLimit-Limit', String(RATE_LIMIT_MAX_REQUESTS));
-    c.header('X-RateLimit-Remaining', '0');
-    c.header('X-RateLimit-Reset', new Date(rateLimit.resetAt).toISOString());
     // Cycle 2.8: tell the client how long to wait instead of making it guess.
     const retryAfterSeconds = Math.max(1, Math.ceil((rateLimit.resetAt - Date.now()) / 1000));
     c.header('Retry-After', String(retryAfterSeconds));
@@ -1607,7 +1621,7 @@ app.post('/api/step', async (c) => {
   // merely stated: escaping and delimiting reduce the injection SURFACE, and
   // this bounds the CONSEQUENCE.
   const policyVerdict = evaluateAction(parsed, {
-    maxStep: Number(process.env.MAX_STEPS) || 35,
+    maxStep: MAX_STEPS,
     step: typeof step === 'number' ? step : 1,
   });
 
@@ -1650,7 +1664,7 @@ app.onError((err, c) => {
 });
 
 // Start server
-const port = Number(process.env.PORT) || 3000;
+const port = parseNumericEnv('PORT', 3000, { min: 1, max: 65535 });
 
 // ---------------------------------------------------------------------------
 // LOOPBACK-ONLY BINDING  (Cycle 3.9)
@@ -1709,7 +1723,11 @@ if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
   log.info(`  Upstream Provider: ${hasGemini ? 'Google Gemini API (Priority 1)' : '9router (Priority 2)'}`);
   log.info(`  Auth:              Authorization: Bearer <jwt>`);
   log.info(`                      (legacy x-secret-password is refused)`);
-  log.info(`  Rate limit:        ${RATE_LIMIT_MAX_REQUESTS} req/min per IP`);
+  const rateLimitWindowLabel =
+    RATE_LIMIT_WINDOW_MS === 60_000
+      ? 'min'
+      : `${(RATE_LIMIT_WINDOW_MS / 1000).toFixed(0)}s`;
+  log.info(`  Rate limit:        ${RATE_LIMIT_MAX_REQUESTS} req/${rateLimitWindowLabel} per IP`);
   // Derived from the constant, not retyped. This banner previously read a
   // hardcoded '25MB' while the enforced limit was 20MB — the same
   // "banner that lied" defect Cycle 3.9 fixed for CORS, and the same one

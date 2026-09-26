@@ -107,6 +107,70 @@ export function redactForLog(input: string): string {
   return processRedactor ? processRedactor(input) : input;
 }
 
+export type LogFormat = 'json' | 'pretty';
+export type LogLevel = 'info' | 'success' | 'warn' | 'error';
+
+let currentLogFormat: LogFormat | null = null;
+
+export function getLogFormat(): LogFormat {
+  if (currentLogFormat) return currentLogFormat;
+  const envVal = (process.env.LOG_FORMAT ?? '').trim().toLowerCase();
+  if (envVal === 'json') return 'json';
+  if (envVal === 'pretty' || envVal === '') return 'pretty';
+  console.warn(`[logger] Unrecognized LOG_FORMAT="${process.env.LOG_FORMAT}". Defaulting to "pretty".`);
+  return 'pretty';
+}
+
+export function setLogFormat(format: LogFormat | null): void {
+  currentLogFormat = format;
+}
+
+const LOG_COLORS = {
+  reset: '\x1b[0m',
+  red: '\x1b[31m',
+  green: '\x1b[32m',
+  yellow: '\x1b[33m',
+  cyan: '\x1b[36m',
+};
+
+export function formatLogEntry(level: LogLevel, msg: string, format: LogFormat = getLogFormat()): string {
+  const cleanMsg = redactForLog(msg);
+  if (format === 'json') {
+    return JSON.stringify({
+      timestamp: new Date().toISOString(),
+      level,
+      message: cleanMsg,
+    });
+  }
+
+  const ts = new Date().toISOString();
+  switch (level) {
+    case 'info':
+      return `${LOG_COLORS.cyan}[${ts}] ℹ INFO${LOG_COLORS.reset}  ${cleanMsg}`;
+    case 'success':
+      return `${LOG_COLORS.green}[${ts}] ✔ SUCCESS${LOG_COLORS.reset} ${cleanMsg}`;
+    case 'warn':
+      return `${LOG_COLORS.yellow}[${ts}] ⚠ WARN${LOG_COLORS.reset}  ${cleanMsg}`;
+    case 'error':
+      return `${LOG_COLORS.red}[${ts}] ✖ ERROR${LOG_COLORS.reset} ${cleanMsg}`;
+  }
+}
+
+export const log = {
+  info(msg: string): void {
+    console.log(formatLogEntry('info', msg));
+  },
+  success(msg: string): void {
+    console.log(formatLogEntry('success', msg));
+  },
+  warn(msg: string): void {
+    console.warn(formatLogEntry('warn', msg));
+  },
+  error(msg: string): void {
+    console.error(formatLogEntry('error', msg));
+  },
+};
+
 /** What we persist about a step. Content is summarised, never stored. */
 export interface ServerLogRecord {
   sessionId: string;

@@ -450,9 +450,22 @@ export function getSessionDetails(sessionId: string): {
  *   - a session_meta.json that will not parse — corrupt JSON must not become
  *     silent deletion of real user data
  */
+function parseRetentionNumeric(raw: string | undefined, defaultValue: number, name: string): number {
+  if (raw === undefined || raw.trim() === '') return defaultValue;
+  const parsed = Number(raw.trim());
+  if (!Number.isFinite(parsed) || parsed < 0 || !Number.isInteger(parsed)) {
+    console.warn(`[sessionStorage] Invalid ${name}="${raw}". Expected non-negative integer. Falling back to default (${defaultValue}).`);
+    return defaultValue;
+  }
+  return parsed;
+}
+
+export const DEFAULT_RETENTION_DAYS = parseRetentionNumeric(process.env.SESSION_RETENTION_DAYS, 7, 'SESSION_RETENTION_DAYS');
+export const DEFAULT_MAX_SESSIONS = parseRetentionNumeric(process.env.MAX_SESSIONS, 100, 'MAX_SESSIONS');
+
 export interface PruneOptions {
-  retentionDays: number;
-  maxSessions: number;
+  retentionDays?: number;
+  maxSessions?: number;
 }
 
 export interface PruneResult {
@@ -460,8 +473,17 @@ export interface PruneResult {
   remaining: number;
 }
 
-export function pruneSessions(options: PruneOptions): PruneResult {
-  const { retentionDays, maxSessions } = options;
+export function pruneSessions(options: PruneOptions = {}): PruneResult {
+  const retentionDays =
+    typeof options.retentionDays === 'number' && Number.isFinite(options.retentionDays)
+      ? options.retentionDays
+      : parseRetentionNumeric(process.env.SESSION_RETENTION_DAYS, 7, 'SESSION_RETENTION_DAYS');
+
+  const maxSessions =
+    typeof options.maxSessions === 'number' && Number.isFinite(options.maxSessions)
+      ? options.maxSessions
+      : parseRetentionNumeric(process.env.MAX_SESSIONS, 100, 'MAX_SESSIONS');
+
   const removed: string[] = [];
 
   try {
