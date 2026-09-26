@@ -51,4 +51,11 @@ if (typeof (globalThis as any).PointerEvent === 'undefined') {
 
 process.env.SECRET_PASSWORD = process.env.SECRET_PASSWORD || 'test-secret-password';
 
+// Cycle 2.5: the server reads ALLOWED_ORIGINS at import time, and setup files
+// run before test modules, so this must be set here — not inside a test file —
+// or the origin guard would reject every supertest/app.request call.
+process.env.ALLOWED_ORIGINS =
+  process.env.ALLOWED_ORIGINS ||
+  'chrome-extension://test-extension-id,http://localhost:3300,http://localhost:3000';
+
 

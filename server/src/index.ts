@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import * as os from 'node:os';
 import { saveSessionStep, initSession, finalizeSession, getStorageStats, listSessions, getSessionDetails } from './sessionStorage';
 import { validateImagePayload } from './imageSafety';
+import { originGuard, parseAllowedOrigins } from './originGuard';
 import {
   evaluateRedactionPolicy,
   recordDegradation,
@@ -123,6 +124,13 @@ const REJECT_UNREDACTED = String(process.env.REJECT_UNREDACTED ?? '').toLowerCas
 const redactionTally: DegradationTally = createDegradationTally();
 
 const app = new Hono();
+
+// Cycle 2.5 (finding #3, CRITICAL): exact-match origin allowlist, registered
+// BEFORE CORS and BEFORE auth so a disallowed origin is refused before any
+// credential is examined. Requests with no Origin (curl, tests, Playwright)
+// pass through to auth; OPTIONS is not evaluated.
+const ALLOWED_ORIGINS = parseAllowedOrigins(process.env.ALLOWED_ORIGINS);
+app.use('*', originGuard(ALLOWED_ORIGINS));
 
 // Exported so tests can drive the REAL server instead of a hand-written
 // mirror. Previously the app was module-private, which meant no test could
