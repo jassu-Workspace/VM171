@@ -25,6 +25,8 @@ storage/*.log
 # committed with 7 real third-party email addresses (commit 8dec66fe).
 # The existing rules covered storage/*.log but not *.jsonl.
 storage/*.jsonl
+storage/masked_outputs/
+scratch/
 
 # ─── Logs ────────────────────────────────────────────────────────
 *.log

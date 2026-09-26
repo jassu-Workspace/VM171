@@ -34,7 +34,7 @@ Dual-model OCR detection and recognition pipeline trained on 50,000 high-precisi
 
 | Field | Value |
 |-------|-------|
-| **Notebook** | `train_ocr_model.ipynb` (Workspace Home Directory) |
+| **Notebook** | `notebooks/train_ocr_model.ipynb` |
 | **Dataset** | 50,000 procedural sovereign samples (Aadhaar, PAN, Passports, ISRO Telemetry) |
 | **Loss Function** | Connectionist Temporal Classification (`nn.CTCLoss(blank=0)`) |
 | **Hardware Config** | Multi-GPU Kaggle (Dual T4), pin_memory, workers=0 (no /dev/shm crash) |

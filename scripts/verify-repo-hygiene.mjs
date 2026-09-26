@@ -160,6 +160,11 @@ note(`skipped ${skippedTests} test files (adversarial fixtures live there; gitle
 const PATH_LEAKS = [/C:[\\/]Users[\\/][^\/\s"']+/i, /\/home\/[a-z0-9._-]+\//i];
 for (const file of tracked) {
   if (!TEXTUAL.test(file) || isTestFile(file)) continue;
+  // The gate scripts must contain the literal patterns, and the comments
+  // explaining this class of bug quote real examples. Without this the gate
+  // flags itself on every run, and a gate that always fails is a gate nobody
+  // reads.
+  if (isGateScript(file)) continue;
   const full = join(ROOT, file);
   if (!existsSync(full) || !statSync(full).isFile()) continue;
   if (statSync(full).size > 2 * 1024 * 1024) continue;
@@ -169,8 +174,19 @@ for (const file of tracked) {
   } catch {
     continue;
   }
+  // JSON and JS source escape backslashes, so a Windows path inside a .json or
+  // .ts file literally reads `C:\\Users\\jaswa\\...`. Every pattern above
+  // expects a single separator, so none of them can ever match that, and the
+  // gate reported a committed report full of `C:\Users\jaswa\Downloads\`
+  // as clean. Verified before fixing: a probe file containing exactly that
+  // passed.
+  //
+  // The fix is to scan a de-escaped copy as well as the raw text, rather than
+  // loosening the patterns — loosening them would weaken the plain-text case
+  // that already works.
+  const deEscaped = text.replace(/\\\\/g, '\\');
   for (const re of PATH_LEAKS) {
-    const hit = text.match(re);
+    const hit = text.match(re) ?? deEscaped.match(re);
     if (hit) fail(`absolute developer path (${hit[0]}) in tracked file: ${file}`);
   }
 }

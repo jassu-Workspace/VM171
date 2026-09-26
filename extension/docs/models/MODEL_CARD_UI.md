@@ -44,7 +44,7 @@ YOLOv8-based UI element detector fine-tuned on 6,000 high-fidelity samples groun
 
 | Field | Value |
 |-------|-------|
-| **Notebook** | `train_ui_detector.ipynb` (Workspace Home Directory) |
+| **Notebook** | `notebooks/train_ui_detector.ipynb` |
 | **Dataset** | 6,000 synthetic procedural samples simulating ISRO portals |
 | **Base Model** | `yolov8s.pt` (Ultralytics) |
 | **Hardware Saturation** | 100% CPU cores (multiprocessing + DataLoader workers), RAM caching (`cache='ram'`), Multi-GPU VRAM saturation |

@@ -14,7 +14,7 @@ into fixed file paths.
 | `custom_dict.txt` (one char per line) | `extension/public/onnx/ocr_dict.txt` | OCR Dictionary |
 
 ## Training Notebook
-Train and quantize the custom 8-class model using `train_ui_detector.ipynb` in the repository root directory. The notebook automatically generates 6,000 ISRO portal samples and exports `ui_detector_quantized.onnx`.
+Train and quantize the custom 8-class model using `notebooks/train_ui_detector.ipynb`. The notebook automatically generates 6,000 ISRO portal samples and exports `ui_detector_quantized.onnx`.
 
 
 ## Steps
