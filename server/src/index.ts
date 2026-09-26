@@ -3,7 +3,7 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { serve } from '@hono/node-server';
 import OpenAI from 'openai';
-import { logRequest } from './logger';
+import { logRequest, createRedactor, setRedactor, redactForLog } from './logger';
 import { randomUUID } from 'node:crypto';
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -44,18 +44,30 @@ function ts(): string {
   return new Date().toISOString();
 }
 
+// Cycle 1.8: every log line passes through the redactor, so the auth secret,
+// API keys, key-shaped tokens and base64 payloads cannot reach stdout ->
+// server_out.log -> CI logs -> shell scrollback. Installed before the first log
+// line is emitted.
+setRedactor(
+  createRedactor({
+    SECRET_PASSWORD: process.env.SECRET_PASSWORD,
+    GEMINI_API_KEY: process.env.GEMINI_API_KEY,
+    ROUTER_API_KEY: process.env.ROUTER_API_KEY,
+  })
+);
+
 const log = {
   info(msg: string): void {
-    console.log(`${COLORS.cyan}[${ts()}] ℹ INFO${COLORS.reset}  ${msg}`);
+    console.log(`${COLORS.cyan}[${ts()}] ℹ INFO${COLORS.reset}  ${redactForLog(msg)}`);
   },
   success(msg: string): void {
-    console.log(`${COLORS.green}[${ts()}] ✔ SUCCESS${COLORS.reset} ${msg}`);
+    console.log(`${COLORS.green}[${ts()}] ✔ SUCCESS${COLORS.reset} ${redactForLog(msg)}`);
   },
   warn(msg: string): void {
-    console.warn(`${COLORS.yellow}[${ts()}] ⚠ WARN${COLORS.reset}  ${msg}`);
+    console.warn(`${COLORS.yellow}[${ts()}] ⚠ WARN${COLORS.reset}  ${redactForLog(msg)}`);
   },
   error(msg: string): void {
-    console.error(`${COLORS.red}[${ts()}] ✖ ERROR${COLORS.reset} ${msg}`);
+    console.error(`${COLORS.red}[${ts()}] ✖ ERROR${COLORS.reset} ${redactForLog(msg)}`);
   },
 };
 
