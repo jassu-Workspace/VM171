@@ -37,6 +37,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { spawn, ChildProcess } from 'node:child_process';
 import { join } from 'node:path';
+import { build } from '../../server/scripts/build.mjs';
 import { DEFAULT_ALLOWED_ORIGINS } from '../../server/src/originGuard';
 
 const SERVER_DIR = join(process.cwd(), '..', 'server');
@@ -46,7 +47,9 @@ const PORT = 3291;
 let proc: ChildProcess;
 let boot = '';
 
+// HERMETIC BUILD — see the note in loopbackBinding.test.ts. Same defect, same fix.
 beforeAll(async () => {
+  await build();
   const { VITEST: _v, NODE_ENV: _n, ...inherited } = process.env;
   proc = spawn(process.execPath, [ARTIFACT], {
     cwd: SERVER_DIR,
@@ -87,7 +90,7 @@ beforeAll(async () => {
     if (proc.exitCode !== null) throw new Error(`server exited early:\n${boot}`);
     await new Promise((r) => setTimeout(r, 300));
   }
-}, 60_000);
+}, 240_000);
 
 afterAll(() => {
   try {

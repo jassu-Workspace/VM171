@@ -40,6 +40,8 @@ import { createConnection } from 'node:net';
 import { networkInterfaces } from 'node:os';
 import { join } from 'node:path';
 
+import { build } from '../../server/scripts/build.mjs';
+
 const SERVER_DIR = join(process.cwd(), '..', 'server');
 const ARTIFACT = join(SERVER_DIR, 'dist', 'index.js');
 
@@ -116,6 +118,21 @@ function boot(env: Record<string, string>): Booted {
 
 const external = externalAddress();
 const booted: Booted[] = [];
+
+// HERMETIC BUILD.
+//
+// This file spawns the built artifact, and `server/dist/` is gitignored — so on
+// a fresh CI checkout it does not exist. The first version of the CI workflow
+// ran `npm test` with no build step, and this file failed there while passing
+// locally, because locally `dist/` happened to be left over from earlier work.
+// A test that passes only because of untracked state left by a previous run is
+// not a test.
+//
+// Building here makes the file self-sufficient and matches what
+// buildQuality.test.ts already does.
+beforeAll(async () => {
+  await build();
+}, 180_000);
 
 afterAll(() => {
   for (const { proc } of booted) {
