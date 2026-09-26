@@ -49,6 +49,26 @@ export const ACTION_NAMES = [
   'back',
 ] as const;
 
+export const MAX_SCRATCHPAD_STRING_LENGTH = 65536;
+
+/**
+ * Value schema for the model's scratchpad working memory.
+ * Preserves free-form flexibility for domain-specific shapes (scalars, arrays, objects)
+ * while enforcing length ceilings on all string values so unbounded strings cannot bypass
+ * the validation boundary.
+ */
+export const ScratchpadValueSchema: z.ZodType<unknown> = z.lazy(() =>
+  z.union([
+    z.string().max(MAX_SCRATCHPAD_STRING_LENGTH),
+    z.number(),
+    z.boolean(),
+    z.null(),
+    z.undefined(),
+    z.array(ScratchpadValueSchema),
+    z.record(z.string().max(256), ScratchpadValueSchema),
+  ])
+);
+
 export const ActionResponseSchema = z
   .object({
     /** One sentence of reasoning. Free text, but bounded. */
@@ -67,8 +87,28 @@ export const ActionResponseSchema = z
     /** CSS selector or element keyword. */
     selector: z.string().max(2048).optional(),
 
+    /**
+     * Deprecated alias for selector; normalized to selector by the server.
+     */
+    target: z.string().max(2048).optional(),
+
     /** Typed text, URL, option label, or 'in'/'out' for zoom. */
     value: z.string().max(65536).optional(),
+
+    /**
+     * Deprecated alias for value; normalized to value by the server.
+     */
+    text: z.string().max(65536).optional(),
+
+    /**
+     * Deprecated alias for value; normalized to value by the server.
+     */
+    url: z.string().max(4096).optional(),
+
+    /**
+     * Deprecated alias for value; normalized to value by the server.
+     */
+    query: z.string().max(65536).optional(),
 
     scroll_direction: z.enum(['up', 'down']).optional(),
 
@@ -76,13 +116,11 @@ export const ActionResponseSchema = z
     summary: z.string().max(8192).optional(),
 
     /**
-     * The model's working memory. `.passthrough()` rather than `.strict()`:
-     * the prompts define a different scratchpad shape per domain (shopping
+     * The model's working memory. Free-form domain-specific shape (shopping
      * tracks candidates, workflow tracks milestones, ISRO tracks telemetry),
-     * so enumerating them here would reject valid replies. It carries no
-     * executable meaning — the action above is what gets performed.
+     * with length-capped string values.
      */
-    scratchpad: z.record(z.string(), z.unknown()).optional(),
+    scratchpad: z.record(z.string().max(256), ScratchpadValueSchema).optional(),
 
     taskMode: z.string().max(64).optional(),
     domain: z.string().max(64).optional(),

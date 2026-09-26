@@ -6,8 +6,33 @@
 import { browser } from 'wxt/browser';
 import * as ort from 'onnxruntime-web';
 import { generateSessionId, SessionLogger, AgentSession } from '../../utils/sessionLogger';
-import { resolveCaptureSource } from '../../utils/captureProvenance';
+import { resolveCaptureSource, type RedactionLegendEntry, type RedactionEnvelope } from '../../utils/captureProvenance';
 import { runController } from '../../utils/runControl';
+
+interface ScreenshotResponse {
+  success: boolean;
+  image?: string;
+  rawImage?: string;
+  legend?: RedactionLegendEntry[];
+  redaction?: RedactionEnvelope;
+  error?: string;
+}
+
+interface ProgressionButtonResponse {
+  success: boolean;
+  found: boolean;
+  id?: string;
+  selector?: string;
+  label?: string;
+}
+
+interface ActionResultResponse {
+  success: boolean;
+  error?: string;
+  isSubmitAction?: boolean;
+  buttonLabel?: string;
+  wasInsideDialog?: boolean;
+}
 import { sendToTab, type ActionDecision } from '../../utils/messaging';
 import { getAgentConfig, authHeadersFor, isAllowedServerUrl, DEFAULT_SERVER_URL } from '../../utils/config';
 import { detectUIElements, getUIStatus, checkModelAvailability } from '../../utils/onnxEngine';
@@ -1012,7 +1037,7 @@ async function runAgentLoop(task: string, tabId: number): Promise<void> {
 
       try {
         const screenshotResponse = await Promise.race([
-          browser.tabs.sendMessage(tabId, {
+          browser.tabs.sendMessage<unknown, ScreenshotResponse>(tabId, {
             type: 'GET_SCREENSHOT',
           }),
           new Promise<null>((res) => setTimeout(() => res(null), 12000)),
@@ -1026,7 +1051,7 @@ async function runAgentLoop(task: string, tabId: number): Promise<void> {
           const resolution = resolveCaptureSource({
             contentScript: {
               ok: true,
-              image: screenshotResponse.image,
+              image: screenshotResponse.image ?? '',
               rawImage: screenshotResponse.rawImage,
               legend: screenshotResponse.legend,
               redaction: screenshotResponse.redaction,
@@ -1053,7 +1078,7 @@ async function runAgentLoop(task: string, tabId: number): Promise<void> {
       // that separation is now explicit and unit-tested.
       if (!archivalRawImage && typeof browser?.tabs?.captureVisibleTab === 'function') {
         try {
-          const directCapture = await browser.tabs.captureVisibleTab(null, {
+          const directCapture = await browser.tabs.captureVisibleTab(undefined, {
             format: 'jpeg',
             quality: 70,
           });
@@ -1398,7 +1423,7 @@ async function runAgentLoop(task: string, tabId: number): Promise<void> {
             delete aiDecision.value;
           } else if (aiDecision.action === 'type') {
             try {
-              const progResp = await browser.tabs.sendMessage(tabId, { type: 'GET_PROGRESSION_BUTTON' });
+              const progResp = await browser.tabs.sendMessage<unknown, ProgressionButtonResponse>(tabId, { type: 'GET_PROGRESSION_BUTTON' });
               if (progResp && progResp.success && progResp.found && (progResp.id || progResp.selector)) {
                 safeSendMessage({
                   type: 'LOG_UPDATE',
@@ -1800,16 +1825,16 @@ async function runAgentLoop(task: string, tabId: number): Promise<void> {
           }
         }
         try {
-          const actionResult = await browser.tabs.sendMessage(tabId, {
+          const actionResult = await browser.tabs.sendMessage<unknown, ActionResultResponse>(tabId, {
             type: 'EXECUTE_ACTION',
             payload: aiDecision,
           });
           // Capture content-script confirmed submission telemetry (strictly requires substantial typed content)
           const hasTypedSubstantialContent = workflowState.contentTyped || lastTypedText.length > 15;
-          if (actionResult && (actionResult as any).isSubmitAction && hasTypedSubstantialContent) {
+          if (actionResult && actionResult.isSubmitAction && hasTypedSubstantialContent) {
             workflowState.submissionInitiated = true;
             workflowState.submissionStep = step;
-            workflowState.submissionButtonLabel = (actionResult as any).buttonLabel || workflowState.submissionButtonLabel || 'Post';
+            workflowState.submissionButtonLabel = actionResult.buttonLabel || workflowState.submissionButtonLabel || 'Post';
           }
           // Check if action actually succeeded
           if (actionResult && actionResult.success === false) {
@@ -1973,7 +1998,7 @@ export default defineBackground(() => {
       setTimeout(async () => {
         try {
           lastTabCaptureTimestamp = Date.now();
-          const dataUrl = await browser.tabs.captureVisibleTab(null, {
+          const dataUrl = await browser.tabs.captureVisibleTab(undefined, {
             format: 'jpeg',
             quality: 70,
           });
@@ -1983,7 +2008,7 @@ export default defineBackground(() => {
           setTimeout(async () => {
             try {
               lastTabCaptureTimestamp = Date.now();
-              const retryUrl = await browser.tabs.captureVisibleTab(null, {
+              const retryUrl = await browser.tabs.captureVisibleTab(undefined, {
                 format: 'jpeg',
                 quality: 70,
               });

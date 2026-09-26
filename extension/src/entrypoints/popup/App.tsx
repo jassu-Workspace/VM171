@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { browser, type Runtime } from 'wxt/browser';
 import { useTheme } from '../../utils/theme';
 import { ThemeToggle } from '../../components/ThemeToggle';
+import { LogUpdateMessageSchema } from '../../types/messages';
 
 const App: React.FC = () => {
   const { theme, toggleTheme } = useTheme();
@@ -22,21 +23,21 @@ const App: React.FC = () => {
   // Listen for LOG_UPDATE messages
   useEffect(() => {
     const messageListener = (
-      message: unknown,
+      rawMessage: unknown,
       _sender: Runtime.MessageSender
     ) => {
-      if (
-        !message ||
-        typeof message !== 'object' ||
-        !('type' in message) ||
-        typeof message.type !== 'string'
-      ) {
+      const parsed = LogUpdateMessageSchema.safeParse(rawMessage);
+      if (!parsed.success) {
         return;
       }
-      const payload = 'payload' in message ? message.payload : undefined;
-      if (message.type === 'LOG_UPDATE' && typeof payload === 'string') {
-        setLogs((prevLogs) => [...prevLogs, payload]);
-        if (payload.includes('✅ Task Complete!') || payload.includes('Aborting') || payload.includes('Agent loop error')) {
+      const message = parsed.data;
+      if (message.type === 'LOG_UPDATE') {
+        setLogs((prevLogs) => [...prevLogs, message.payload]);
+        if (
+          message.payload.includes('✅ Task Complete!') ||
+          message.payload.includes('Aborting') ||
+          message.payload.includes('Agent loop error')
+        ) {
           setIsRunning(false);
         }
       }

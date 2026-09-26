@@ -294,7 +294,7 @@ export function getMaskedDom(): string {
     } else {
       const aria = element.getAttribute('aria-label') || '';
       const title = element.getAttribute('title') || '';
-      const rawContent = element.textContent || element.innerText || '';
+      const rawContent = element.textContent || (element instanceof HTMLElement ? element.innerText : '') || '';
       elementText = aria && aria.length > rawContent.length ? aria : (rawContent || aria || title);
       if (element.id) meta += ` id="${element.id}"`;
 
@@ -402,7 +402,7 @@ export function getMaskedDom(): string {
   // Summarize the most relevant interactive elements (up to 140) with enriched metadata
   // Retain elements that have either text or meta attributes (e.g. empty search inputs)
   const interactiveSummary = elementMap
-    .filter((el) => el.text.length > 0 || el.meta.length > 0)
+    .filter((el) => el.text.length > 0 || (el.meta?.length ?? 0) > 0)
     .slice(0, 140)
     .map((el) => `[${el.id}] <${el.tag}${el.meta ? ' ' + el.meta : ''}> ${(el.text || '(empty input)').slice(0, 140).replace(/\s+/g, ' ')}`)
     .join('\n');
@@ -878,12 +878,20 @@ export async function handleCustomCombobox(
  * The Operative: Executes actions on DOM elements
  * Handles click, type, and done actions with async modal retry & rich-text support
  */
+export interface ActionResult {
+  success: boolean;
+  error?: string;
+  isSubmitAction?: boolean;
+  buttonLabel?: string;
+  wasInsideDialog?: boolean;
+}
+
 export async function executeAction(actionJson: {
   action: string;
   selector?: string;
   id?: string;
   value?: string;
-}): Promise<{ success: boolean; error?: string }> {
+}): Promise<ActionResult> {
   try {
     switch (actionJson.action) {
       case 'click': {
@@ -1286,9 +1294,9 @@ export async function executeAction(actionJson: {
               // ignore
             }
             if (!htmlEl.textContent || htmlEl.textContent.trim().length === 0) {
-              const paragraphs = textToSet.split(/\r?\n/).filter((p) => p.trim().length > 0);
+              const paragraphs = textToSet.split(/\r?\n/).filter((p: string) => p.trim().length > 0);
               if (paragraphs.length > 0) {
-                htmlEl.innerHTML = paragraphs.map((p) => `<p>${escapeHtml(p)}</p>`).join('');
+                htmlEl.innerHTML = paragraphs.map((p: string) => `<p>${escapeHtml(p)}</p>`).join('');
               } else {
                 htmlEl.innerHTML = `<p>${escapeHtml(textToSet)}</p>`;
               }
@@ -2327,16 +2335,25 @@ export async function scanImagesForPII(
  * Captures a screenshot via the background script, then blurs/solid-fills all
  * sensitive bounding boxes entirely on the client using the native Canvas API.
  */
-export async function captureAndRedact(): Promise<{
+export interface CaptureAndRedactResult {
   rawImage: string;
   image: string;
   legend: Array<{ id: string; type: string; bbox: number[] }>;
-}> {
+  redaction?: {
+    state: string;
+    engine: string;
+    degradedAt: string | null;
+    reason: string | null;
+    violations: string[];
+  };
+}
+
+export async function captureAndRedact(): Promise<CaptureAndRedactResult> {
   // 1) Get local sensitive regions (DOM inputs + rendered text nodes)
   const regions = detectSensitiveDOMRegions();
 
   // 2) Ask the background script (service worker) for a screenshot
-  const screenshotDataUrl = await browser.runtime.sendMessage({
+  const screenshotDataUrl = await browser.runtime.sendMessage<unknown, string>({
     type: 'CAPTURE_TAB',
   });
 
@@ -2681,7 +2698,7 @@ export default defineContentScript({
               timestamp: Date.now(),
               totalSensitiveCount: regions.length,
               categoryCounts,
-              regions: regions.map((r) => ({ id: r.id, type: r.type, text: r.maskedText })),
+              regions: regions.map((r) => ({ id: r.id, type: r.type, text: r.text })),
               legend: captureRes.legend || [],
               image: captureRes.image || '',
             });

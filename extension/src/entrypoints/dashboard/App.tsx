@@ -4,6 +4,7 @@ import { useTheme } from '../../utils/theme';
 import { getAgentConfig, authHeadersFor } from '../../utils/config';
 import { ThemeToggle } from '../../components/ThemeToggle';
 import { getHardwareProfile, detectHardwareTier, HardwareProfile } from '../../utils/hardwareTier';
+import { LogUpdateMessageSchema } from '../../types/messages';
 
 /* ------------------------------------------------------------------ */
 /* Types                                                               */

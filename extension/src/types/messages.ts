@@ -12,8 +12,7 @@
  * trusted objects without shape validation allows arbitrary or malformed data
  * to reach internal handlers.
  *
- * `.strict()` is enforced across all message schemas (with controlled
- * passthrough only on extensible action decisions) so unknown or smuggled keys
+ * `.strict()` is enforced across all message schemas so unknown or smuggled keys
  * are rejected immediately at the boundary before processing.
  *
  * Ceilings on strings and payloads prevent resource exhaustion and runaway
@@ -22,12 +21,31 @@
 import { z } from 'zod';
 
 /**
+ * Action verbs implemented by the extension's executeAction handler.
+ */
+export const ACTION_VERBS = [
+  'click',
+  'type',
+  'fill',
+  'input',
+  'select',
+  'choose',
+  'zoom',
+  'navigate',
+  'scroll',
+  'back',
+  'done',
+] as const;
+
+export type ActionVerb = (typeof ACTION_VERBS)[number];
+
+/**
  * Action decision payload executed by the content script (Cycle 3.1).
  * Supports standard navigation, typing, clicks, and progression actions.
  */
 export const ActionDecisionSchema = z
   .object({
-    action: z.string().max(64, 'action name exceeds 64 characters'),
+    action: z.enum(ACTION_VERBS),
     id: z.string().max(512).optional(),
     selector: z.string().max(2048).optional(),
     target: z.string().max(2048).optional(),
@@ -49,7 +67,7 @@ export const ActionDecisionSchema = z
     buttonLabel: z.string().max(256).optional(),
     wasInsideDialog: z.boolean().optional(),
   })
-  .passthrough();
+  .strict();
 
 export type ActionDecisionPayload = z.infer<typeof ActionDecisionSchema>;
 
@@ -186,3 +204,159 @@ export type ShowShieldMessage = z.infer<typeof ShowShieldMessageSchema>;
 export type AuditPageMessage = z.infer<typeof AuditPageMessageSchema>;
 export type GetScreenshotMessage = z.infer<typeof GetScreenshotMessageSchema>;
 export type GetProgressionButtonMessage = z.infer<typeof GetProgressionButtonMessageSchema>;
+
+/* ---------------------------------------------------------------------------
+ * UI & Runtime Event Messages (Popup, Sidepanel, Dashboard)
+ * ------------------------------------------------------------------------- */
+
+export const LogUpdateMessageSchema = z
+  .object({
+    type: z.literal('LOG_UPDATE'),
+    payload: z.string().max(65536),
+  })
+  .strict();
+
+export const AgentStatusMessageSchema = z
+  .object({
+    type: z.literal('AGENT_STATUS'),
+    payload: z
+      .object({
+        isRunning: z.boolean().optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+
+export const MilestoneSchema = z
+  .object({
+    id: z.number(),
+    name: z.string().max(1024),
+    status: z.enum(['pending', 'in_progress', 'completed']),
+  })
+  .strict();
+
+export const CandidateSchema = z
+  .object({
+    title: z.string().max(1024),
+    price: z.string().max(256).optional(),
+    rating: z.string().max(256).optional(),
+    verdict: z.enum(['rejected', 'candidate_matched']),
+    rejectionReason: z.string().max(2048).optional(),
+  })
+  .strict();
+
+export const ExtractedItemSchema = z
+  .object({
+    title: z.string().max(1024).optional(),
+    id: z.string().max(512).optional(),
+    details: z.string().max(8192).optional(),
+    sourceUrl: z.string().max(4096).optional(),
+  })
+  .strict();
+
+export const ScratchpadDataSchema = z
+  .object({
+    originalGoal: z.string().max(8192).optional(),
+    hardConstraints: z.array(z.string().max(2048)).optional(),
+    softPreferences: z.array(z.string().max(2048)).optional(),
+    milestones: z.array(MilestoneSchema).optional(),
+    activeMilestoneIndex: z.number().int().optional(),
+    evaluatedCandidates: z.array(CandidateSchema).optional(),
+    extractedItems: z.array(ExtractedItemSchema).optional(),
+    verificationGate: z
+      .object({
+        satisfied: z.boolean(),
+        matchedTitle: z.string().max(1024).optional(),
+        matchedPrice: z.string().max(256).nullable().optional(),
+        matchedRating: z.string().max(256).nullable().optional(),
+        summary: z.string().max(8192).optional(),
+      })
+      .strict()
+      .optional(),
+    workflowGate: z
+      .object({
+        actionConfirmed: z.boolean(),
+        confirmationText: z.string().max(4096).nullable().optional(),
+      })
+      .strict()
+      .optional(),
+    reflection: z.string().max(8192).optional(),
+    lastExecutionFailure: z.string().max(8192).optional(),
+  })
+  .passthrough();
+
+export const ScratchpadUpdateMessageSchema = z
+  .object({
+    type: z.literal('SCRATCHPAD_UPDATE'),
+    payload: ScratchpadDataSchema.nullable().optional(),
+  })
+  .strict();
+
+export const AGENT_ACTIVITY_PHASES = [
+  'Scanning',
+  'Redacting',
+  'Thinking',
+  'Executing',
+  'Backtracking',
+  'Complete',
+  'Idle',
+  'Aborted',
+  'Blocked',
+] as const;
+
+export const AgentActivityDataSchema = z
+  .object({
+    step: z.number().int(),
+    maxSteps: z.number().int().optional(),
+    phase: z.enum(AGENT_ACTIVITY_PHASES),
+    thought: z.string().max(8192).optional(),
+    action: z.string().max(64).optional(),
+    targetLabel: z.string().max(512).optional(),
+    value: z.string().max(65536).optional(),
+    statusText: z.string().max(4096).optional(),
+    evaluatedCount: z.number().int().optional(),
+    rejectedCount: z.number().int().optional(),
+    matchedCount: z.number().int().optional(),
+    rejectionReasons: z.array(z.string().max(1024)).optional(),
+    activeMilestone: z.string().max(512).optional(),
+    summary: z.string().max(8192).optional(),
+    taskMode: z.enum(['shopping', 'workflow', 'info']).optional(),
+    actionCount: z.number().int().optional(),
+    completedMilestonesCount: z.number().int().optional(),
+    totalMilestonesCount: z.number().int().optional(),
+    isGoalVerified: z.boolean().optional(),
+  })
+  .strict();
+
+export const AgentActivityMessageSchema = z
+  .object({
+    type: z.literal('AGENT_ACTIVITY'),
+    payload: AgentActivityDataSchema,
+  })
+  .strict();
+
+export const PopupMessageSchema = LogUpdateMessageSchema;
+export const DashboardMessageSchema = LogUpdateMessageSchema;
+
+export const SidepanelMessageSchema = z.discriminatedUnion('type', [
+  LogUpdateMessageSchema,
+  ScratchpadUpdateMessageSchema,
+  AgentStatusMessageSchema,
+  AgentActivityMessageSchema,
+]);
+
+export type LogUpdateMessage = z.infer<typeof LogUpdateMessageSchema>;
+export type AgentStatusMessage = z.infer<typeof AgentStatusMessageSchema>;
+export type ScratchpadUpdateMessage = z.infer<typeof ScratchpadUpdateMessageSchema>;
+export type AgentActivityMessage = z.infer<typeof AgentActivityMessageSchema>;
+export type PopupMessage = z.infer<typeof PopupMessageSchema>;
+export type DashboardMessage = z.infer<typeof DashboardMessageSchema>;
+export type SidepanelMessage = z.infer<typeof SidepanelMessageSchema>;
+
+export type Milestone = z.infer<typeof MilestoneSchema>;
+export type Candidate = z.infer<typeof CandidateSchema>;
+export type ExtractedItem = z.infer<typeof ExtractedItemSchema>;
+export type ScratchpadData = z.infer<typeof ScratchpadDataSchema>;
+export type AgentActivityData = z.infer<typeof AgentActivityDataSchema>;
+
