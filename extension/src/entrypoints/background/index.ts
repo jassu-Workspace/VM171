@@ -7,6 +7,7 @@ import { browser } from 'wxt/browser';
 import * as ort from 'onnxruntime-web';
 import { generateSessionId, SessionLogger, AgentSession } from '../../utils/sessionLogger';
 import { resolveCaptureSource } from '../../utils/captureProvenance';
+import { runController } from '../../utils/runControl';
 import { sendToTab, type ActionDecision } from '../../utils/messaging';
 import { getAgentConfig, authHeadersFor, isAllowedServerUrl, DEFAULT_SERVER_URL } from '../../utils/config';
 import { detectUIElements, getUIStatus, checkModelAvailability } from '../../utils/onnxEngine';
@@ -100,6 +101,12 @@ export async function requestHumanConfirmation(label: string): Promise<boolean> 
 }
 const STEP_DELAY_MS = 2500;
 
+// Cycle 3.3: DEPRECATED. This single module-level flag could not express "stop
+// THAT run" — starting a second run reset it and silently un-stopped the first,
+// and nothing prevented two runs from interleaving clicks and typing on the same
+// page. Replaced by runController, which scopes cancellation to a run id and
+// refuses a concurrent start. Kept only as a mirror for the two status reads
+// below, which the controller now answers authoritatively.
 let stopRequested = false;
 
 console.log('🌐 Default server URL:', DEFAULT_SERVER_URL, '(the active URL comes from paired storage)');
@@ -774,6 +781,19 @@ async function runAgentLoop(task: string, tabId: number): Promise<void> {
   let finalStep = 1;
   stopRequested = false;
 
+  // Cycle 3.3: claim the single run slot. The caller already refused a
+  // concurrent start, so this is expected to succeed; if it somehow does not,
+  // the loop still runs, and the guard below keeps it honest.
+  const runId = `run_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const claimed = runController.start({ runId, tabId, startedAt: Date.now() });
+  if (!claimed.accepted) {
+    safeSendMessage({
+      type: 'LOG_UPDATE',
+      payload: `Refusing to start: run ${claimed.activeRunId ?? 'unknown'} is already active.`,
+    });
+    return;
+  }
+
   safeSendMessage({ type: 'AGENT_STATUS', payload: { isRunning: true } });
   try {
     await browser.tabs.sendMessage(tabId, { type: 'SHOW_SHIELD', payload: { active: true } });
@@ -803,6 +823,10 @@ async function runAgentLoop(task: string, tabId: number): Promise<void> {
   try {
     for (let step = 1; step <= MAX_STEPS; step++) {
       finalStep = step;
+      // Cycle 3.3: the controller is authoritative. The loop-local flag is kept
+      // as an OR so a stop that arrived before registration is not lost, but a
+      // stop scoped to THIS run is what actually governs the loop.
+      stopRequested = stopRequested || runController.isStopRequested(runId);
       if (stopRequested) {
         safeSendMessage({ type: 'LOG_UPDATE', payload: '🛑 Agent stopped by user.' });
         break;
@@ -1867,6 +1891,11 @@ async function runAgentLoop(task: string, tabId: number): Promise<void> {
     await finalizeSession(lastMaskedText, lastRedactedImage);
     setLoopStatus('Idle');
   } finally {
+    // Cycle 3.3: release the single run slot. Without this the extension bricks
+    // itself after a single run — every later START_AGENT is refused as
+    // "already running" with no way out. Scoped by runId so a late finally from
+    // an older run cannot clear a newer one's slot.
+    runController.finish(runId);
     safeSendMessage({ type: 'AGENT_STATUS', payload: { isRunning: false } });
     if (!completedSuccessfully) {
       safeSendMessage({
@@ -1965,7 +1994,9 @@ export default defineBackground(() => {
 
     // Handle STOP_AGENT
     if (message.type === 'STOP_AGENT') {
-      stopRequested = true;
+      // Cycle 3.3: scoped to the active run, and idempotent. The previous code
+      // set a global that a subsequent START_AGENT would clear.
+      stopRequested = runController.requestStop() !== null;
       setLoopStatus('Idle');
       browser.tabs.query({ active: true, currentWindow: true }).then((tabs) => {
         if (tabs[0]?.id) {
@@ -1980,6 +2011,18 @@ export default defineBackground(() => {
     if (message.type === 'START_AGENT') {
       const task = message.payload;
       const specifiedTabId = message.targetTabId;
+
+      // Cycle 3.3: refuse a concurrent run rather than starting a second one.
+      // Two runs would share the scratchpad, the telemetry counters and — worst
+      // of all — the DOM, interleaving clicks and typing in the same page.
+      if (runController.isActive()) {
+        sendResponse({
+          success: false,
+          error: 'An agent run is already in progress. Stop it before starting another.',
+          activeRunId: runController.activeRunId(),
+        });
+        return false;
+      }
 
       // Telemetry: agent is leaving Idle as soon as a task is accepted.
       setLoopStatus('Scanning');
