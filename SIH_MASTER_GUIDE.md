@@ -69,7 +69,7 @@ The system follows a **Zero-Trust split-brain** architecture:
 |                  SERVER (Hono)                         |
 |                                                       |
 |  +-------------------------------------------------+  |
-|  |  Auth Middleware (x-secret-password)            |  |
+|  |  Auth Middleware (bearer token, all routes)     |  |
 |  +-----------------------+-------------------------+  |
 |                          v                            |
 |  +-------------------------------------------------+  |
@@ -142,19 +142,32 @@ Create a `.env` file in `/server`:
 
 ```env
 PORT=3000
+HOST=127.0.0.1
 SECRET_PASSWORD=my-secret-key
-ROUTER_URL=https://api.9router.ai/api/v1
-ROUTER_API_KEY=your-router-api-key-here
+GEMINI_API_KEY=your-gemini-key
+# ...or, as a fallback provider:
+# ROUTER_URL=https://api.9router.ai/api/v1
+# ROUTER_API_KEY=your-router-api-key-here
 ```
 
 Start the server:
 
 ```bash
-npm run dev
-# or: npx tsx src/index.ts
+npm ci
+npm run dev     # development: tsx watch
+npm start       # production: bundles, then runs the artifact
 ```
 
-The server will start on `http://localhost:3000`.
+The server starts on `http://127.0.0.1:3000` and **binds to loopback only**.
+A non-loopback `HOST` is refused and logged.
+
+**Copy the pairing code from the boot output.** You need it to pair the
+extension. It is single-use and is regenerated on every boot unless you pin
+`SECRETS_PAIRING_CODE` yourself.
+
+`SECRET_PASSWORD` is a **boot gate**, not the auth mechanism. There is no
+shared secret between the extension and the server: the extension exchanges the
+pairing code for a 15-minute signed bearer token.
 
 #### Step 3: Set Up the Extension
 
@@ -184,7 +197,13 @@ This starts the WXT dev server and outputs to `.output/chrome-mv3-dev/`.
 1. Click the extension icon to open the popup
 2. Enter a task (e.g., "Book a train ticket from Delhi to Mumbai")
 3. Click **Run Agent**
-4. Watch the logs as the agent scans the DOM, redacts PII, and executes actions### 2.3 Project Structure
+4. Watch the logs as the agent scans the DOM, redacts PII, and executes actions
+
+> **Before the first task: pair the extension.** Open the side panel, enter the
+> pairing code the server printed on boot, and confirm the server URL
+> (`http://127.0.0.1:3000`). Until it is paired the extension makes **zero**
+> requests to the server — it refuses at the call site rather than sending an
+> unauthenticated request. See §2.2 Step 3.5.### 2.3 Project Structure
 
 ```
 sih-zero-trust-agent/
@@ -325,9 +344,24 @@ npm run test:watch
 | Variable | Description | Example |
 |----------|-------------|----------|
 | `PORT` | Server port | `3000` |
-| `SECRET_PASSWORD` | Auth password (must match extension) | `my-secret-key` |
-| `ROUTER_URL` | 9router base URL | `https://api.9router.ai/api/v1` |
+| `SECRET_PASSWORD` | Boot gate (required to start; not the auth mechanism) | `my-secret-key` |
+| `GEMINI_API_KEY` | Google Gemini key — preferred provider | `AIza...` |
+| `ROUTER_URL` | 9router base URL (fallback provider) | `https://api.9router.ai/api/v1` |
 | `ROUTER_API_KEY` | Your 9router API key | `sk-xxxxxxxxxxxxxxxx` |
+
+> ### Cloud deployment is no longer supported
+>
+> This section previously described deploying to Render and Railway. **That
+> setup is now refused by design.** The server binds to loopback only and
+> rejects a non-loopback `HOST` at boot, because it fronts an auth surface
+> whose only credential is a pairing code printed to the console.
+>
+> A cloud deployment would also put un-redacted DOM captures and session
+> artifacts behind a network boundary on a machine you do not control. The
+> loopback-only posture is a security control, not a deployment inconvenience.
+>
+> Deploy only if you have read `ZERO_TRUST_AI_WEB_AGENT_SPECIFICATION.md` and
+> made that trade deliberately.
 
 #### Step 4: Deploy
 
@@ -552,7 +586,7 @@ Submit at [Firefox Add-ons Developer Hub](https://addons.mozilla.org/developers/
 | Variable | Required | Description | Default |
 |----------|----------|-------------|----------|
 | `PORT` | No | Server port | `3000` |
-| `SECRET_PASSWORD` | Yes | Auth password (must match extension) | -- |
+| `SECRET_PASSWORD` | Yes | Boot gate only — not the auth mechanism | -- |
 | `ROUTER_URL` | Yes | 9router base URL | -- |
 | `ROUTER_API_KEY` | Yes | 9router API key | -- |
 
@@ -561,7 +595,7 @@ Submit at [Firefox Add-ons Developer Hub](https://addons.mozilla.org/developers/
 | Constant | Location | Description |
 |----------|----------|-------------|
 | `SERVER_URL` | `src/entrypoints/background/index.ts` | Server endpoint |
-| `SECRET_PASSWORD` | `src/entrypoints/background/index.ts` | Auth password |
+| *(none)* | — | The extension holds no shared secret; it pairs and holds a bearer token |
 | `MAX_STEPS` | `src/entrypoints/background/index.ts` | Max agent loop iterations |
 | `STEP_DELAY_MS` | `src/entrypoints/background/index.ts` | Delay between steps |
 | `telemetryData` / `LoopStatus` | `src/entrypoints/background/index.ts` | In-memory `{ apiCalls, totalPayloadSent, lastLatency, loopStatus }`; dashboard polls via `{ type: 'GET_TELEMETRY' }` |

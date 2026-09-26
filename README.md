@@ -104,7 +104,7 @@ browser tab (DOM sanitization, OCR, face redaction, UI vision, click/type execut
 |                                  v                                                        |
 +-------------------------------------------------------------------------------------------+
 |                           ORCHESTRATION SERVER (Hono / Node)                              |
-|   • x-secret-password auth       • sliding-window rate limit (40 req/min)                 |
+|   • bearer-token auth (pairing)  • sliding-window rate limit (40 req/min)                 |
 |   • plaintext firewall (Luhn & regex quarantine)                                           |
 |   • domain classifier (ISRO / Workflow / Shopping / Info)                                  |
 |   • pre-VLM workflow-completion gate                                                       |
@@ -232,18 +232,30 @@ User task  →  START_AGENT  →  Background worker
 ```bash
 cd server
 cp .env.example .env        # then edit with your keys (see Environment Variables)
-npm install
-npm run dev                 # tsx watch → http://localhost:3000
+npm ci
+npm run dev                 # tsx watch, for development
+# npm start                  # production: builds a bundle, then runs it
 ```
 
-> The server exposes `/health` and `/api/system-telemetry`. Startup validates that both
-> `SECRET_PASSWORD` and at least one AI provider are configured.
+> The server binds to **127.0.0.1 only**. A non-loopback `HOST` is refused and
+> logged, not honoured.
+>
+> Startup validates that `SECRET_PASSWORD` and at least one AI provider are
+> configured, and exits if either is missing. Every route — `/health`
+> included — requires a bearer token.
+>
+> **Note the pairing code in the boot output.** You need it in step 3. It is
+> single-use, and it is generated fresh on every boot unless you pin
+> `SECRETS_PAIRING_CODE` yourself.
+
+For production, `npm start` runs `prestart` (an esbuild bundle) and then
+`node dist/index.js`. Nothing is transpiled at boot.
 
 ### 2. Build & Load the Extension
 
 ```bash
 cd extension
-npm install
+npm ci
 npm run build               # also runs copy-assets (onnx/mediapipe → output)
 ```
 
@@ -257,7 +269,22 @@ Then in Chrome:
 > **One-click alternative:** run `.\s.ps1` (production) or `.\extension\171s.ps1` (dev) from the
 > repo root to check Node, install deps, clean port 3000, build, and launch both services.
 
-### 3. Run Your First Task
+### 3. Pair the Extension
+
+Auth is a signed 15-minute bearer token, not a shared password. The extension
+exchanges a **one-time pairing code** for a token, and the code is printed by
+the **server** on boot.
+
+1. Copy the pairing code from the server's boot output
+2. Open the extension side panel and enter it, with the server URL
+   (`http://127.0.0.1:3000`)
+3. The token is stored in `chrome.storage.local`
+
+While unpaired the extension makes **zero** requests to the server.
+
+Losing the code is not a problem — restart the server for a new one.
+
+### 4. Run Your First Task
 
 In the popup / side panel, enter a task such as:
 
@@ -285,7 +312,12 @@ Click **⚡ Run Autonomous Agent** and watch the console, HUD milestones, and Mi
 | Variable | Required | Description | Default |
 |----------|----------|-------------|---------|
 | `PORT` | No | Server port | `3000` |
-| `SECRET_PASSWORD` | **Yes** | Auth header `x-secret-password` — must match the extension | — |
+| `SECRET_PASSWORD` | **Yes** | Boot gate only. Required to start; it is **not** the auth mechanism. | — |
+| `HOST` | No | Bind address. **Enforced** loopback — a non-loopback value is refused. | `127.0.0.1` |
+| `SECRETS_SIGNING_KEY` | No | HS256 signing key. Generated on boot if unset. | random |
+| `SECRETS_PAIRING_CODE` | No | Pin the one-time pairing code. Generated on boot if unset. | random |
+| `ALLOWED_ORIGINS` | No | CORS allowlist. A disallowed `Origin` gets 403. | see `.env.example` |
+| `SESSION_STORAGE_DIR` | No | Where session artifacts are written. | `storage/sessions` |
 | `GEMINI_API_KEY` | Either* | Google Gemini key (Priority 1 provider) | — |
 | `ROUTER_URL` | Either* | 9router base URL (Priority 2 fallback) | — |
 | `ROUTER_API_KEY` | Either* | 9router API key | — |
@@ -294,12 +326,20 @@ Click **⚡ Run Autonomous Agent** and watch the console, HUD milestones, and Mi
 
 \* You must configure **at least one** AI provider (Gemini is preferred).
 
-### Extension (compile-time constants — `src/entrypoints/background/index.ts`)
+### Extension
 
-| Constant | Purpose |
-|----------|---------|
-| `SERVER_URL` | Server `/api/step` endpoint |
-| `SECRET_PASSWORD` | Auth password (must match server) |
+There is **no shared secret in the extension.** It authenticates by pairing,
+not by a password both sides happen to hold.
+
+| Item | Purpose |
+|------|---------|
+| `SERVER_URL` | Fallback server URL, used only until the extension is paired |
+| Paired server URL | Stored in `chrome.storage.local` at pairing time |
+| Bearer token | 15-minute HS256 token, refreshed by re-pairing. Held in `chrome.storage.local`. |
+
+While unpaired the extension makes **zero** fetch calls to the server — it
+refuses at the call site rather than sending an unauthenticated request and
+handling the rejection.
 | `MAX_STEPS` | Max agent-loop iterations |
 | `STEP_DELAY_MS` | Pause between loop steps |
 | `telemetryData` / `LoopStatus` | In-memory telemetry polled by the dashboard |
@@ -367,7 +407,11 @@ are in `extension/docs/models/`. See `extension/docs/MODEL_DROP_IN.md` for the f
 
 ## 📡 API Reference
 
-All endpoints except `/health` and `/api/system-telemetry` require the `x-secret-password` header.
+**Every** endpoint requires `Authorization: Bearer <jwt>` — `/health` and
+`/api/system-telemetry` included, which was verified on a running server. The
+legacy `x-secret-password` header is refused on purpose.
+
+Obtain a token from `POST /api/auth/pair` with the one-time pairing code.
 CORS is open (needed for the extension). Payload limit **25 MB**; upstream VLM timeout **35 s**.
 
 ### `POST /api/step` — core agent decision
@@ -426,7 +470,45 @@ The platform enforces three layers of defense before anything leaves the tab:
    - **Forensic plaintext sweep:** structured DOM/values are scanned for residual unmasked PII (Luhn-aware for cards); any violation **blocks transmission**.
 3. **Server-side firewall** — a second regex/Luhn quarantine rejects any payload that still contains raw PII with `UNSANITIZED_PAYLOAD_REJECTED`.
 
-**Compliance targeting:** DPDP Act 2023, Aadhaar Act 2016 (§29), RBI Card-on-File, PCI-DSS v4.0, ISO/IEC 7810/7812, ISO 27001/27701.
+### Trust boundary
+
+The server is not a trusted party with respect to page content. Untrusted text
+is delimited and neutralised to inert tags, so page content cannot become an
+instruction — including an instruction to end the run early.
+
+**Completion is an observation, not a verdict.** The page may claim the task
+finished; that claim is recorded with a strength and a source and marked
+`verified: false`, and whether the agent may stop is decided server-side, where
+page text cannot issue orders. Detection is locale-aware (English and Hindi
+ship) and a failure message on the page vetoes a success one.
+
+### Other controls
+
+- **Action policy** sits between the model and `executeAction`, so a successful
+  prompt injection still cannot cause a dangerous action. Destructive and
+  irreversible actions require explicit confirmation.
+- **Run isolation** — one active run at a time; cancellation is scoped to a run
+  id, so a stale cancel cannot kill a newer run.
+- **Origin allowlist** — a disallowed `Origin` is refused with 403.
+- **Rate limiting** — 40 req/min per socket IP, with a bounded map.
+- **Body limit** — 25 MB, and image payloads are checked by magic bytes.
+- **Fail-visible redaction** — when `captureVisibleTab` is unavailable the
+  capture is still taken but always labelled `degraded`, with a tally. It is not
+  silently passed off as clean.
+- **Logging is redacted** — keys, JWTs and PEM blocks never reach disk.
+
+### Compliance targeting
+
+DPDP Act 2023, Aadhaar Act 2016 (§29), RBI Card-on-File, PCI-DSS v4.0,
+ISO/IEC 7810/7812, ISO 27001/27701.
+
+### Known gaps
+
+- `host_permissions` includes `<all_urls>`, which a cross-site agent needs. It
+  is a standing risk and the reason this needs Web Store review.
+- 5 `high` advisories remain in the **build toolchain** (`wxt` and its
+  transitive tree) and 2 in the test runner. Both are dev-only; neither ships.
+  The fixes require breaking upgrades of `wxt` and `vitest`.
 
 ---
 
@@ -455,7 +537,8 @@ The platform enforces three layers of defense before anything leaves the tab:
 
 | Symptom | Likely cause | Fix |
 |---------|--------------|-----|
-| `Unauthorized` | Mismatched `SECRET_PASSWORD` | Align extension constant + `server/.env` |
+| `Unauthorized` / `401` | Not paired, or the 15-minute token expired | Re-pair from the extension side panel. A pairing code is single-use; restart the server for a new one. |
+| Extension says "not paired" | Pairing never completed | Check the code the **server** printed on boot — it is not in `server/.env` unless you pinned it |
 | Extension not loading | Wrong output folder | Use `.output/chrome-mv3` (prod) / `-dev` |
 | Face detection fails | MediaPipe assets missing | `npm run fetch-models` |
 | Model status `degraded` | ONNX files absent | Drop models into `extension/public/onnx/` |

@@ -4,6 +4,32 @@ Architecture Type: Distributed Edge-Cloud Hybrid (Zero-Trust)
 
 Core Philosophy: "The Cloud does the thinking; The Edge does the acting."
 
+---
+
+## ⚠️ What Is Actually Built vs. What Is Aspirational
+
+This document is the original pitch framing and is kept as the record of intent.
+Read it as a vision, not as a description. Concretely:
+
+| This document says | Reality |
+|---|---|
+| "Hosted on Railway/Render" | **Local only.** The server binds to loopback and *refuses* a non-loopback `HOST` at boot. Cloud deployment is blocked by design, not by oversight. |
+| "The Database (The Vault)" storing user accounts and subscriptions | **No database exists.** There is no user account system, no multi-tenancy, and no server-side identity store. |
+| "Telemetry & Billing Engine" tracking tokens per user to charge $10/month | **No billing.** Telemetry is per-session local statistics. |
+| "verifies the user's API key/subscription" | There are no users and no subscription. Auth is a signed bearer token obtained by exchanging a one-time pairing code. |
+| "LLM Router … routes to a premium model" | Two fixed providers in priority order: Gemini, then 9router. No per-task cost routing. |
+| "Client Redaction + Server VLM" | Redaction is real. There is no server-side VLM — vision is local ONNX, and the model call is a text LLM. |
+
+The three-layer redaction path, the split-brain execution model, and the
+"bouncer at the edge" idea **are** built and are described accurately above.
+
+**Trust boundary worth stating explicitly:** the server is not trusted with
+respect to page content. Untrusted page text is delimited and neutralised so it
+cannot become an instruction — including an instruction to end the agent's run.
+A page claiming the task is finished produces an *observation* with a strength
+and a source, marked unverified; whether the agent may stop is decided
+server-side. See `README.md` § Security & Privacy Model for the full list.
+
 1\. The Three Pillars of Your Startup
 
 Pillar A: The Edge Client (The Browser Extension)
