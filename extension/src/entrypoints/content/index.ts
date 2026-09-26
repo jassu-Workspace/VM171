@@ -33,6 +33,7 @@ import {
   isIdCardGeometry,
   shouldFailClosedQuarantine,
 } from '../../utils/piiNormalizer';
+import { ContentMessageSchema } from '../../types/messages';
 
 /**
  * Sanitizes any string payload across all 25 sensitive classes while freezing
@@ -2630,7 +2631,14 @@ export default defineContentScript({
   matches: ['<all_urls>'],
   main() {
     // Listen for messages from the extension
-    browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    browser.runtime.onMessage.addListener((rawMessage, _sender, sendResponse) => {
+      const parsed = ContentMessageSchema.safeParse(rawMessage);
+      if (!parsed.success) {
+        // Do not handle unknown messages; return false so the channel closes cleanly
+        return false;
+      }
+      const message = parsed.data;
+
       if (message.type === 'PING') {
         // Health-check ping from the background script to verify the content script is loaded.
         sendResponse({ success: true });
@@ -2718,17 +2726,6 @@ export default defineContentScript({
               });
             }
           });
-        return true;
-      } else if (message.type === 'WAIT_FOR_STABLE') {
-        // Smart Latency Engine: wait for the page to settle before responding
-        waitForPageStable()
-          .then((stable) => sendResponse({ success: stable }))
-          .catch((err) =>
-            sendResponse({
-              success: false,
-              error: err instanceof Error ? err.message : 'Stability check failed',
-            })
-          );
         return true;
       } else if (message.type === 'GET_PROGRESSION_BUTTON') {
         const activeDialog = document.querySelector(

@@ -12,6 +12,7 @@ import { sendToTab, type ActionDecision } from '../../utils/messaging';
 import { getAgentConfig, authHeadersFor, isAllowedServerUrl, DEFAULT_SERVER_URL } from '../../utils/config';
 import { detectUIElements, getUIStatus, checkModelAvailability } from '../../utils/onnxEngine';
 import { getOcrStatus, checkOcrAvailability } from '../../utils/ocrEngine';
+import { BackgroundMessageSchema } from '../../types/messages';
 
 // ONNX Runtime Web configuration: single-threaded WASM fallback,
 // safe for MV3 service workers where SharedArrayBuffer is unavailable.
@@ -1935,11 +1936,17 @@ export default defineBackground(() => {
 
   let lastTabCaptureTimestamp = 0;
 
-  browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-    console.log('📡 Received runtime message:', message);
+  browser.runtime.onMessage.addListener((rawMessage, _sender, sendResponse) => {
+    console.log('📡 Received runtime message:', rawMessage);
+    const parsed = BackgroundMessageSchema.safeParse(rawMessage);
+    if (!parsed.success) {
+      return false;
+    }
+    const message = parsed.data;
+
     // PHASE 1 — Dashboard telemetry poll. Must stay synchronous (no async work)
     // so the dashboard's 1s setInterval never hangs.
-    if (message?.type === 'GET_TELEMETRY') {
+    if (message.type === 'GET_TELEMETRY') {
       // Non-blocking: ensure model availability is checked so status is accurate.
       runModelAvailabilityCheck();
       sendResponse(telemetryData);
@@ -1949,7 +1956,7 @@ export default defineBackground(() => {
     // PHASE 5 — Local model runtime status poll.
     // Await the availability check BEFORE sending response so the dashboard
     // sees the correct 'live' status on first load.
-    if (message?.type === 'GET_MODEL_STATUS') {
+    if (message.type === 'GET_MODEL_STATUS') {
       void (async () => {
         await runModelAvailabilityCheck();
         sendResponse(refreshModelStatus());
