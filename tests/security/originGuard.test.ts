@@ -38,12 +38,13 @@
  *   - an allowlisted origin being rejected
  */
 import { describe, it, expect, beforeAll } from 'vitest';
+import { DEFAULT_ALLOWED_ORIGINS } from '../../server/src/originGuard';
 import { authHeader } from '../setup/authHelper';
 
 type AppLike = { request: (input: string, init?: RequestInit) => Promise<Response> };
 
 const SECRET = process.env.SECRET_PASSWORD ?? '';
-const ALLOWED = 'chrome-extension://test-extension-id';
+const ALLOWED = 'chrome-extension://fidbnhfgcadfpjlmdfpnngikjpdhcdcf';
 const HOSTILE = 'https://evil.example';
 
 let app: AppLike;
@@ -148,5 +149,36 @@ describe('Cycle 2.5 — origin allowlist', () => {
     return post({ Origin: 'http://localhost:3300/' }).then((res) => {
       expect(res.status).toBe(403);
     });
+  });
+});
+
+describe('the allowlist must name a real extension id, never a placeholder', () => {
+  it('contains no placeholder-shaped extension origin', () => {
+    // THE REGRESSION THIS EXISTS TO CATCH
+    //
+    // The allowlist shipped `chrome-extension://test-extension-id`. That matched
+    // nothing, so originGuard rejected every real extension request with a 403
+    // before authentication — the extension could not talk to the server in the
+    // default configuration. 676 tests passed, including ones asserting that
+    // placeholder was allowed. Only an end-to-end browser test found it.
+    //
+    // A test that asserts a placeholder against itself always passes. This one
+    // asserts the list is made of real, specific origins.
+    for (const origin of DEFAULT_ALLOWED_ORIGINS) {
+      if (!origin.startsWith('chrome-extension://')) continue;
+      const id = origin.replace('chrome-extension://', '');
+      expect(id, `"${origin}" must be a real 32-character extension id`).toMatch(/^[a-p]{32}$/);
+      expect(id.toLowerCase(), `"${origin}" looks like a placeholder`).not.toMatch(
+        /^(test|dummy|example|placeholder|your|changeme|xxx)/,
+      );
+    }
+  });
+
+  it('actually admits the pinned extension id', () => {
+    // A list can be perfectly well-formed and still not contain the id the
+    // shipped extension actually uses.
+    expect(DEFAULT_ALLOWED_ORIGINS).toContain(
+      'chrome-extension://fidbnhfgcadfpjlmdfpnngikjpdhcdcf',
+    );
   });
 });

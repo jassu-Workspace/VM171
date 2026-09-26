@@ -59,7 +59,7 @@ const localArea = {
 
 const mockChrome = {
   runtime: {
-    id: 'sih-test-extension-id',
+    id: 'sih-fidbnhfgcadfpjlmdfpnngikjpdhcdcf',
     onMessage: { addListener: vi.fn(), removeListener: vi.fn() },
     sendMessage: vi.fn().mockResolvedValue({ success: true }),
     getURL: vi.fn((path: string) => `chrome-extension://mock-id/${path}`),
@@ -122,7 +122,7 @@ process.env.SECRETS_PAIRING_CODE = process.env.SECRETS_PAIRING_CODE || 'test-pai
 
 process.env.ALLOWED_ORIGINS =
   process.env.ALLOWED_ORIGINS ||
-  'chrome-extension://test-extension-id,http://localhost:3300,http://localhost:3000';
+  'chrome-extension://fidbnhfgcadfpjlmdfpnngikjpdhcdcf,http://localhost:3300,http://localhost:3000';
 
 // Cycle 2.7: read at import time, so tests need a small limit to exercise the
 // oversized case cheaply. Production defaults to 20 MB.

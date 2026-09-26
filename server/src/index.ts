@@ -218,6 +218,79 @@ const PAIRING_CODE =
 // credential is examined. Requests with no Origin (curl, tests, Playwright)
 // pass through to auth; OPTIONS is not evaluated.
 const ALLOWED_ORIGINS = parseAllowedOrigins(process.env.ALLOWED_ORIGINS);
+
+// Declared ahead of the wire trace below so the trace can report the threshold
+// a rejected body was measured against. Same value, same env var, same
+// default as the `bodyLimit` registration further down — do not fork it.
+const MAX_BODY_BYTES = Number(process.env.MAX_BODY_BYTES) || 20 * 1024 * 1024;
+
+// ── WIRE TRACE (diagnostic, opt-in) ─────────────────────────────────────────
+// TEMPORARY. Registered FIRST — above originGuard, bodyLimit, CORS and the
+// request logger — because every one of those can short-circuit, and a
+// middleware placed below any of them is blind to exactly the requests you
+// are trying to find. This is the only vantage point inside the process that
+// observes 100% of traffic, including requests rejected before any other
+// logger runs.
+//
+// Why it exists: a 413 was being returned by `bodyLimit` and no log line
+// named the endpoint that triggered it, because `bodyLimit` sits ABOVE the
+// request logger. The four silent rejection paths (originGuard on OPTIONS,
+// CORS answering preflight without next(), bodyLimit preceding the logger,
+// and an MV3 service worker that restarts and loses patched globals) are what
+// made this undiagnosable from outside the process.
+//
+// Policy, per logger.ts: LENGTHS AND STATES ONLY. No bodies, no headers.
+// `c.req.path` is the pathname WITHOUT the query string (Hono parses it out
+// of the raw URL), so a token passed as `?token=` cannot land here — but that
+// is the reason to keep using `.path` and never `.url`.
+//
+// Routed through `log.error` rather than `console.error` so it obeys the
+// project-wide invariant that every log line passes the redactor, and so it
+// lands on stderr next to the server's other diagnostics.
+//
+// Enable with WIRE_TRACE=1. Costs nothing when the var is unset.
+if (process.env.WIRE_TRACE) {
+  app.use('*', async (c, next) => {
+    const started = Date.now();
+    const method = c.req.method;
+    const path = c.req.path;
+    // `content-length` is absent for chunked transfer-encoding, which is
+    // itself a signal: bodyLimit still enforces while streaming, so an
+    // oversized chunked body 413s WITHOUT ever advertising a size.
+    const declared = c.req.header('content-length');
+    const len = declared === undefined ? 'chunked/absent' : `${declared}B`;
+
+    // Emitted on the way IN, so the line is on stderr even if a downstream
+    // middleware throws or short-circuits before the outcome line can run.
+    // This is the whole point: the request logger at the bottom of the stack
+    // never runs for a bodyLimit rejection, so the only way to see the
+    // offending request is to speak before it.
+    log.error(`[wire] >> ${method} ${path} content-length=${len}`);
+
+    try {
+      await next();
+    } catch (err) {
+      log.error(
+        `[wire] !! ${method} ${path} content-length=${len} THREW ` +
+        `${err instanceof Error ? err.message : String(err)}`
+      );
+      throw err;
+    }
+
+    const status = c.res.status;
+    // `over=` is the number you actually want: it tells you whether this is
+    // genuinely over the limit, or a different failure wearing a 413 costume.
+    const extra = status === 413
+      ? ` limit=${MAX_BODY_BYTES}B over-by=${declared !== undefined ? Number(declared) - MAX_BODY_BYTES : 'unknown(chunked)'}`
+      : '';
+    const paint = status >= 400 ? COLORS.red : COLORS.green;
+    log.error(
+      `[wire] << ${method} ${path} content-length=${len} ` +
+      `${paint}status=${status}${COLORS.reset} (${Date.now() - started}ms)${extra}`
+    );
+  });
+}
+
 app.use('*', originGuard(ALLOWED_ORIGINS));
 
 // Cycle 2.7: enforce the body limit BEFORE any handler reads a body.
@@ -230,7 +303,6 @@ app.use('*', originGuard(ALLOWED_ORIGINS));
 //      multi-byte characters passed a limit it exceeded by 2-3x.
 // `bodyLimit` enforces on Content-Length AND during streaming, so an oversized
 // body is never fully buffered.
-const MAX_BODY_BYTES = Number(process.env.MAX_BODY_BYTES) || 20 * 1024 * 1024;
 app.use(
   '/api/*',
   bodyLimit({
@@ -1649,7 +1721,21 @@ if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
   log.info(`  Auth:              Authorization: Bearer <jwt>`);
   log.info(`                      (legacy x-secret-password is refused)`);
   log.info(`  Rate limit:        ${RATE_LIMIT_MAX_REQUESTS} req/min per IP`);
-  log.info(`  Payload limit:     25MB`);
+  // Derived from the constant, not retyped. This banner previously read a
+  // hardcoded '25MB' while the enforced limit was 20MB — the same
+  // "banner that lied" defect Cycle 3.9 fixed for CORS, and the same one
+  // that makes an operator misjudge what will be rejected.
+  //
+  // Formatted at the right magnitude rather than always in MB: the test
+  // environment sets MAX_BODY_BYTES=32768, and an MB-only formatter renders
+  // that as "0MB" — technically derived, still a lie, and it hid the fact
+  // that the limit actually in force was two orders of magnitude below the
+  // default. This is the defect that made a 50 KB payload look legal.
+  const limitLabel =
+    MAX_BODY_BYTES >= 1024 * 1024
+      ? `${(MAX_BODY_BYTES / (1024 * 1024)).toFixed(0)}MB`
+      : `${(MAX_BODY_BYTES / 1024).toFixed(0)}KB`;
+  log.info(`  Payload limit:     ${limitLabel}`);
   log.info(`  Upstream timeout:  35s`);
   log.info(`  Session Vault:     storage/sessions/<sessionId>/`);
 

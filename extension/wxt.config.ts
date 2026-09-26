@@ -29,6 +29,19 @@ export default defineConfig({
     name: 'Zero-Trust AI Web Agent',
     description: 'A zero-trust AI web agent that masks PII and executes actions locally',
     version: '1.0.0',
+    // PINNED EXTENSION ID.
+    //
+    // Without `key`, Chrome derives the ID from the load path, so it differs on
+    // every machine. The server's origin allowlist cannot list an ID it does not
+    // know, so an unpacked build was rejected by originGuard with a 403 before
+    // auth was ever reached — the extension could not talk to the server at all
+    // in the default configuration.
+    //
+    // The PUBLIC key only. It is not a secret: it is shipped in the manifest and
+    // is what makes the ID stable and knowable in advance. The private key is
+    // NOT in this repository.
+    key: 'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAmdnqsNdRs2Su4Va8lqExtv3Z7sp1DDabiTjm3LvTvsfKcxzp4fbutBqfXwfhjft1y9IRSMS+skfqgV8AivWhQcWqKVZRuN/mpSaHRjpbbD+dEjfGmLVrl7kUxAXr1lZc8aEidxoh3+hLFv/wKhdyoH+Ck9s7YqnemU7WSv8rSiIsoHaHGYLs/t50yU51PdIcHGpDCDmeykEiTNXT4nn9erVL/dvyIX4UxBP9Ib9CA0MO8OUWEs8+/jOgZUmI1bBp8kJujZlSjFip+lfu9vpnRTnPmzUi8Q2rNXwxLOqDt16q6Qx0KOudLkdLOclJid5jTsK16UqXibg+8YlL9G0czQIDAQAB',
+
     permissions: ['activeTab', 'scripting', 'storage', 'sidePanel', 'tabs'],
     host_permissions: ['<all_urls>'],
     side_panel: {

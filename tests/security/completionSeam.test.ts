@@ -22,7 +22,7 @@ type AppLike = { request: (input: string, init?: RequestInit) => Promise<Respons
 const SECRET = process.env.SECRET_PASSWORD ?? '';
 const KEY = process.env.SECRETS_SIGNING_KEY ?? '';
 const PAIRING = process.env.SECRETS_PAIRING_CODE ?? '';
-const ALLOWED = 'chrome-extension://test-extension-id';
+const ALLOWED = 'chrome-extension://fidbnhfgcadfpjlmdfpnngikjpdhcdcf';
 const AUDIENCE = 'ztai-agent';
 
 let app: AppLike;

@@ -29,7 +29,12 @@
 import type { Context, Next } from 'hono';
 
 export const DEFAULT_ALLOWED_ORIGINS: readonly string[] = [
-  'chrome-extension://test-extension-id',
+  // The real, PINNED extension id (see extension/wxt.config.ts `key`).
+  // This used to be the literal 'chrome-extension://test-extension-id', which
+  // matched nothing: originGuard rejected every real extension request with a
+  // 403 before authentication, so the product was non-functional by default.
+  // The unit tests passed because they asserted that placeholder against itself.
+  'chrome-extension://fidbnhfgcadfpjlmdfpnngikjpdhcdcf',
   'http://localhost:3300',
   'http://localhost:3000',
 ];

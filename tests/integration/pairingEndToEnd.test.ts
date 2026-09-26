@@ -21,7 +21,7 @@ import {
 
 type AppLike = { request: (input: string, init?: RequestInit) => Promise<Response> };
 
-const ALLOWED = 'chrome-extension://test-extension-id';
+const ALLOWED = 'chrome-extension://fidbnhfgcadfpjlmdfpnngikjpdhcdcf';
 const PAIRING = process.env.SECRETS_PAIRING_CODE ?? '';
 
 let app: AppLike;

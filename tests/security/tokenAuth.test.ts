@@ -25,7 +25,7 @@ import {
 
 type AppLike = { request: (input: string, init?: RequestInit) => Promise<Response> };
 
-const ALLOWED = 'chrome-extension://test-extension-id';
+const ALLOWED = 'chrome-extension://fidbnhfgcadfpjlmdfpnngikjpdhcdcf';
 const LEGACY_SECRET = process.env.SECRET_PASSWORD ?? '';
 // These MUST be the values the server reads from the environment, not
 // freshly generated ones — an earlier version generated its own key and code,

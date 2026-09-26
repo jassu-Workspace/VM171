@@ -31,7 +31,7 @@ import { authHeader } from '../setup/authHelper';
 type AppLike = { request: (input: string, init?: RequestInit) => Promise<Response> };
 
 const SECRET = process.env.SECRET_PASSWORD ?? '';
-const ALLOWED = 'chrome-extension://test-extension-id';
+const ALLOWED = 'chrome-extension://fidbnhfgcadfpjlmdfpnngikjpdhcdcf';
 const HOSTILE = 'https://evil.example';
 
 let app: AppLike;

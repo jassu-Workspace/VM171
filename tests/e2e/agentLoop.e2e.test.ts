@@ -34,6 +34,8 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { chromium, type BrowserContext, type Worker } from 'playwright';
 import { createServer, type Server } from 'node:http';
+import * as http from 'node:http';
+import { build } from '../../server/scripts/build.mjs';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -44,16 +46,37 @@ const SERVER_DIR = join(process.cwd(), '..', 'server');
 
 const AI_PORT = 3411;
 const APP_PORT = 3412;
+const PROXY_PORT = 3413;
 const PAIRING_CODE = 'e2e-pairing-code';
+// Surfaced in diagnostics so a 413 is never a mystery.
+const MAX_BODY_NOTE = '20MB default (MAX_BODY_BYTES)';
 
 let aiServer: Server;
 let appServer: ChildProcess;
+// Module scope, NOT local to `beforeAll`. It used to be declared with
+// `const proxy = createServer(...)` inside the beforeAll callback, which made it
+// invisible to `afterAll` — so cleanup threw `ReferenceError: proxy is not
+// defined` and, because that line runs BEFORE the `rmSync` calls, the temp
+// profile and session directories were leaked on every run. A teardown that
+// throws is worse than no teardown: it also masks the real test failure behind
+// a suite-level error.
+let proxy: Server;
 let ctx: BrowserContext;
 let worker: Worker;
 let profileDir: string;
 let sessionDir: string;
 let serverLog = '';
 let swLog = '';
+/**
+ * The proxy's view of every request, readable from the failure handler.
+ *
+ * Module scope so the CLICK NEVER HAPPENED assertion can include it. When the
+ * loop breaks, the two questions that matter are "did a request leave the
+ * browser?" and "what size was it?", and the proxy is the only thing in this
+ * file that can answer both. Leaving them inside the test body meant the one
+ * diagnostic that explains a 413 was unreachable from the error that reports it.
+ */
+let proxyLog: string[] = [];
 const SERVER_LOG_FILE = join(tmpdir(), 'vm171-e2e-server.log');
 
 /** Every request the "AI" received, so we can assert what was actually sent. */
@@ -111,12 +134,18 @@ beforeAll(async () => {
   await new Promise<void>((r) => aiServer.listen(AI_PORT, '127.0.0.1', r));
 
   // ── 2. The REAL server, pointed at the mock ──────────────────────────────
+  // HERMETIC BUILD. This file spawns server/dist/index.js, and dist/ is gitignored.
+  // It ran against a STALE bundle that still contained the old placeholder origin,
+  // which is why the fix looked like it had not worked. The other two spawn-based
+  // suites already build themselves; this one did not.
+  await build();
+
   sessionDir = mkdtempSync(join(tmpdir(), 'vm171-e2e-sess-'));
   // Strip the runner's own environment. Vitest exports VITEST=1, and the server
   // skips serve() entirely when it sees that — so the process would start,
   // never listen, and exit 0. That is exactly what happened on the first run
   // of this file.
-  const { VITEST: _v, NODE_ENV: _n, ...inherited } = process.env;
+  const { VITEST: _v, NODE_ENV: _n, MAX_BODY_BYTES: _m, ...inherited } = process.env;
   appServer = spawn(process.execPath, [join(SERVER_DIR, 'dist', 'index.js')], {
     cwd: SERVER_DIR,
     env: {
@@ -124,6 +153,28 @@ beforeAll(async () => {
       PORT: String(APP_PORT),
       NODE_ENV: 'production',
       SECRET_PASSWORD: 'e2e-placeholder-not-a-secret',
+      // THE 413, AT LAST, NAMED.
+      //
+      // `MAX_BODY_BYTES` used to be inherited from the vitest process, where
+      // setupExtensionMock.ts pins it to 32768 so the unit body-limit tests can
+      // exercise a small boundary quickly. That 32KB is a UNIT-TEST convenience.
+      // This suite sends a real screenshot payload of roughly 50KB, so
+      // inheriting it meant every agent-loop request was refused with 413
+      // before the model was ever called — and the refusal named no endpoint,
+      // because bodyLimit sits above the request logger.
+      //
+      // The loop then failed on "the click never happened", which reads like a
+      // browser-automation problem and is not one at all.
+      //
+      // A 320x240 viewport was already being used to keep the payload small,
+      // with a comment claiming the limit was 20MB. It was 32KB. At 32KB even
+      // a tiny screenshot is over, so that mitigation could never have sufficed.
+      //
+      // Set EXPLICITLY to the production default rather than inherited, so this
+      // suite exercises the configuration a real deployment runs. Stripped from
+      // `inherited` above so an operator's exported value cannot silently
+      // reintroduce the same failure.
+      MAX_BODY_BYTES: String(20 * 1024 * 1024),
       // No GEMINI_API_KEY: force the fallback path so the mock is used.
       GEMINI_API_KEY: '',
       ROUTER_URL: `http://127.0.0.1:${AI_PORT}/v1`,
@@ -151,6 +202,53 @@ beforeAll(async () => {
   }
   if (!up) throw new Error('server never began listening');
 
+  // ── 2b. Logging proxy in front of the server ─────────────────────────────
+  // A service worker can be terminated and restarted at any time, so a patch on
+  // globalThis.fetch does not survive to observe the request. A proxy does.
+  // It records the real Content-Length and the largest JSON fields, then
+  // forwards untouched.
+  //
+  // The extension is pointed at PROXY_PORT (see pairExtension), so every
+  // request the agent loop makes transits here.
+  proxy = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      const raw = Buffer.concat(chunks);
+      {
+        const fields: Record<string, number> = {};
+        try {
+          const parsed = JSON.parse(raw.toString('utf8'));
+          for (const k of Object.keys(parsed)) {
+            const v = parsed[k];
+            fields[k] = typeof v === 'string' ? v.length : JSON.stringify(v ?? '').length;
+          }
+        } catch { /* not json */ }
+        const top = Object.entries(fields)
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 6)
+          .map(([k, v]) => `${k}=${v}`)
+          .join(', ');
+        (globalThis as any).__proxyLog = ((globalThis as any).__proxyLog ?? []).concat(
+          `${req.method} ${req.url} len=${raw.length} auth=${req.headers.authorization ? 'yes' : 'no'} | ${top}`,
+        );
+      }
+      const upstream = http.request(
+        { host: '127.0.0.1', port: APP_PORT, path: req.url, method: req.method, headers: req.headers },
+        (up) => {
+          const lg = (globalThis as any).__proxyLog ?? [];
+          lg.push(`  -> responded ${up.statusCode}`);
+          (globalThis as any).__proxyLog = lg;
+          res.writeHead(up.statusCode ?? 502, up.headers);
+          up.pipe(res);
+        },
+      );
+      upstream.on('error', () => res.writeHead(502).end());
+      upstream.end(raw);
+    });
+  });
+  await new Promise<void>((r) => proxy.listen(PROXY_PORT, '127.0.0.1', r));
+
   // ── 3. Chromium with the extension ───────────────────────────────────────
   profileDir = mkdtempSync(join(tmpdir(), 'vm171-e2e-prof-'));
   ctx = await chromium.launchPersistentContext(profileDir, {
@@ -160,6 +258,10 @@ beforeAll(async () => {
       `--load-extension=${EXTENSION_PATH}`,
       '--no-sandbox',
       '--disable-dev-shm-usage',
+      // Small viewport on purpose: the /api/step payload carries base64
+      // screenshots, which inflate ~33%. A full-size viewport produces a body
+      // over the server's 20MB limit and the agent dies with an opaque 413.
+      '--window-size=320,240',
     ],
   });
   [worker] = ctx.serviceWorkers();
@@ -179,6 +281,7 @@ afterAll(async () => {
   await ctx?.close();
   appServer?.kill('SIGTERM');
   aiServer?.close();
+  proxy?.close();
   for (const d of [profileDir, sessionDir]) if (d) rmSync(d, { recursive: true, force: true });
 });
 
@@ -197,7 +300,7 @@ async function pairExtension(): Promise<void> {
     async ([url, tok]) => {
       await chrome.storage.local.set({ agentConfig: { serverUrl: url, token: tok } });
     },
-    [`http://127.0.0.1:${APP_PORT}`, token] as [string, string],
+    [`http://127.0.0.1:${PROXY_PORT}`, token] as [string, string],
   );
 }
 
@@ -210,7 +313,7 @@ describe('E2E — the real agent loop, content script to AI and back', () => {
     await pairExtension();
     const stored = await worker.evaluate(() => chrome.storage.local.get('agentConfig'));
     const cfg = stored.agentConfig as { serverUrl: string; token: string };
-    expect(cfg.serverUrl).toBe(`http://127.0.0.1:${APP_PORT}`);
+    expect(cfg.serverUrl).toBe(`http://127.0.0.1:${PROXY_PORT}`);
     expect(cfg.token).toBeTruthy();
   });
 
@@ -219,6 +322,7 @@ describe('E2E — the real agent loop, content script to AI and back', () => {
     // so a pass means the action was really dispatched and really dispatched
     // to THIS element, not merely that some call returned 200.
     const page = await ctx.newPage();
+    await page.setViewportSize({ width: 320, height: 240 });
     await page.goto(`http://127.0.0.1:${AI_PORT}/fixture`);
     expect(await page.textContent('#target')).toBe('Run me');
 
@@ -234,6 +338,14 @@ describe('E2E — the real agent loop, content script to AI and back', () => {
     // runtime.sendMessage, so sending from there fails with "Receiving end does
     // not exist". This is the same path the real popup uses.
     const extId = new URL(worker.url()).host;
+    // The loaded id MUST equal the pinned id, or originGuard 403s every
+    // request. Asserted rather than assumed — a mismatched id is silent,
+    // because cors answers preflights before the request logger runs, so a
+    // blocked preflight leaves no trace in the server log at all.
+    console.log('[E2E] loaded extension id:', extId);
+    expect(extId, 'the built extension id must match the id pinned in the manifest key').toBe(
+      'fidbnhfgcadfpjlmdfpnngikjpdhcdcf',
+    );
     const control = await ctx.newPage();
     await control.goto(`chrome-extension://${extId}/popup.html`);
 
@@ -246,6 +358,90 @@ describe('E2E — the real agent loop, content script to AI and back', () => {
       return hit?.id ?? -1;
     }, '/fixture');
     expect(tabId, 'the fixture tab must be findable by url').toBeGreaterThanOrEqual(0);
+
+    // MEASURE, do not guess. Patch fetch in the service worker so the actual
+    // body size is recorded, and break the payload down by field. Two earlier
+    // hypotheses about this 413 were wrong, so the number has to come from the
+    // bytes rather than from reasoning about them.
+    await worker.evaluate(() => {
+      const w = globalThis as any;
+      w.__payloadSizes = [];
+      const orig = w.fetch?.bind(w);
+      w.fetch = async (input: any, init: any) => {
+        try {
+          const body = init?.body;
+          if (typeof body === 'string') {
+            const rec: Record<string, number> = { total: body.length };
+            try {
+              const parsed = JSON.parse(body);
+              for (const k of Object.keys(parsed)) {
+                const v = parsed[k];
+                rec[k] = typeof v === 'string' ? v.length : JSON.stringify(v ?? '').length;
+              }
+            } catch { /* not json */ }
+            w.__payloadSizes.push(rec);
+          }
+        } catch { /* never break the app */ }
+        return orig(input, init);
+      };
+    });
+
+    // DIAGNOSTIC: ask the browser what it actually sees. A fetch that hangs
+    // with no error is a preflight that never completes, and the server log
+    // cannot show that — originGuard skips OPTIONS and cors answers preflights
+    // without calling next(), so nothing is ever logged.
+    const diag = await control.evaluate(async (url) => {
+      const out: Record<string, unknown> = {};
+      try {
+        const r = await fetch(url, {
+          method: 'OPTIONS',
+          headers: {
+            Origin: 'chrome-extension://fidbnhfgcadfpjlmdfpnngikjpdhcdcf',
+            'Access-Control-Request-Method': 'POST',
+            'Access-Control-Request-Headers': 'authorization,content-type',
+          },
+        });
+        out.preflightStatus = r.status;
+        out.allowOrigin = r.headers.get('access-control-allow-origin');
+        out.allowHeaders = r.headers.get('access-control-allow-headers');
+      } catch (e) {
+        out.preflightError = String(e);
+      }
+      try {
+        const ctl = new AbortController();
+        setTimeout(() => ctl.abort(), 8000);
+        const r2 = await fetch(url, { method: 'POST', signal: ctl.signal, headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        out.postStatus = r2.status;
+      } catch (e) {
+        out.postError = String(e);
+      }
+      return out;
+    }, `http://127.0.0.1:${APP_PORT}/api/step`);
+    console.log('[E2E DIAG]', JSON.stringify(diag));
+    console.log('[E2E] server body limit:', MAX_BODY_NOTE);
+
+    // READ THE PROXY LOG BEFORE THE DECLARATION IS A CRASH, NOT A DIAGNOSTIC.
+    // These two lines were in the opposite order, so the `for` loop hit the
+    // temporal dead zone and threw
+    //   ReferenceError: Cannot access 'proxyLog' before initialization
+    // BEFORE the log was read and BEFORE the payload sizes were collected. The
+    // test then died without printing a single [PROXY] line, which reads
+    // exactly like "the proxy captured nothing" — the opposite of the truth.
+    // Absence of output was never absence of traffic.
+    const proxyLogNow = ((globalThis as any).__proxyLog ?? []) as string[];
+    console.log(`[E2E] proxy saw ${proxyLogNow.length} request(s) so far (pre-loop; the agent has not run yet)`);
+    for (const line of proxyLogNow.slice(-12)) console.log('[PROXY]', line);
+    const sizes = await worker.evaluate(() => (globalThis as any).__payloadSizes ?? []);
+    for (const rec of sizes.slice(0, 2)) {
+      const fields = Object.entries(rec)
+        .filter(([k]) => k !== 'total')
+        .sort((a, b) => (b[1] as number) - (a[1] as number))
+        .slice(0, 6);
+      console.log(
+        `[E2E] payload total=${rec.total} bytes | largest fields: ` +
+          fields.map(([k, v]) => `${k}=${v}`).join(', '),
+      );
+    }
 
     const ack = await control.evaluate(
       async ([task, tab]) =>
@@ -260,8 +456,16 @@ describe('E2E — the real agent loop, content script to AI and back', () => {
     } catch (e) {
       const clean = serverLog.replace(/\x1b\[[0-9;]*m/g, '');
       const tail = clean.trim().split('\n').slice(-30).join('\n');
+      proxyLog = ((globalThis as any).__proxyLog ?? []) as string[];
+      // The proxy's record of what actually went over the wire, INCLUDING the
+      // upstream status. A 413 here names the size that caused it; a 401 names
+      // an auth problem; an empty log means the request never left the browser.
+      // Those are three completely different bugs and the message must not
+      // leave that distinction to guesswork.
       throw new Error(
-        `CLICK NEVER HAPPENED. aiCalls=${aiCalls.length}\n--- sw/page console ---\n${swLog.slice(-3000)}\n--- server log ---\n${tail}`,
+        `CLICK NEVER HAPPENED. aiCalls=${aiCalls.length}\n` +
+        `--- proxy (${proxyLog.length} request(s)) ---\n${proxyLog.slice(-15).join('\n') || '(none — nothing left the browser)'}\n` +
+        `--- sw/page console ---\n${swLog.slice(-3000)}\n--- server log ---\n${tail}`,
       );
     }
 
