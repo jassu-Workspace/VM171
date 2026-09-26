@@ -13,6 +13,11 @@ import {
   SanitizedDomElement,
 } from '../../src/utils/leakVerifier';
 
+// Cycle 1.1: the verifier now fails safe when availability is unreported.
+// These cases all model "detection ran", so declare it explicitly — otherwise
+// the negative assertions would pass for the wrong reason.
+const DETECTION_RAN = { detectionAvailable: true } as const;
+
 describe('LeakVerifier — Dual-Layer Fail-Closed Security Boundary', () => {
   it('validates authentic credit card numbers with Luhn checksum', () => {
     expect(isLuhnValid('4111 1111 1111 1111')).toBe(true);
@@ -43,7 +48,7 @@ describe('LeakVerifier — Dual-Layer Fail-Closed Security Boundary', () => {
       { id: 'agent-1', tag: 'div', text: 'Card: [CARD]' },
     ];
 
-    const result = runSecurityBoundaryVerification(detected, redacted, dom, 0.85);
+    const result = runSecurityBoundaryVerification(detected, redacted, dom, 0.85, DETECTION_RAN);
     expect(result.passed).toBe(true);
     expect(result.coverageCheck.passed).toBe(true);
     expect(result.jsonSanitizationCheck.rawPIIFound).toBe(false);
@@ -62,7 +67,7 @@ describe('LeakVerifier — Dual-Layer Fail-Closed Security Boundary', () => {
       { id: 'agent-1', tag: 'div', text: 'Address: [ADDRESS]' },
     ];
 
-    const result = runSecurityBoundaryVerification(detected, underCovered, dom, 0.85);
+    const result = runSecurityBoundaryVerification(detected, underCovered, dom, 0.85, DETECTION_RAN);
     expect(result.passed).toBe(false);
     expect(result.coverageCheck.passed).toBe(false);
     expect(result.reasons.some((v) => v.includes('Coverage gap'))).toBe(true);
@@ -79,7 +84,7 @@ describe('LeakVerifier — Dual-Layer Fail-Closed Security Boundary', () => {
       { id: 'agent-1', tag: 'input', type: 'password', text: 'unmaskedSecret123', value: 'unmaskedSecret123' },
     ];
 
-    const result = runSecurityBoundaryVerification(detected, redacted, leakingDOM, 0.85);
+    const result = runSecurityBoundaryVerification(detected, redacted, leakingDOM, 0.85, DETECTION_RAN);
     expect(result.passed).toBe(false);
     expect(result.jsonSanitizationCheck.rawPIIFound).toBe(true);
     expect(result.reasons.some((v) => v.includes('unmasked password'))).toBe(true);
@@ -92,7 +97,7 @@ describe('LeakVerifier — Dual-Layer Fail-Closed Security Boundary', () => {
       { id: 'agent-dev', tag: 'code', text: 'const key = "sk-proj-1234567890abcdef1234567890";' },
     ];
 
-    const result = runSecurityBoundaryVerification(detected, redacted, leakingDOM, 0.85);
+    const result = runSecurityBoundaryVerification(detected, redacted, leakingDOM, 0.85, DETECTION_RAN);
     expect(result.passed).toBe(false);
     expect(result.jsonSanitizationCheck.rawPIIFound).toBe(true);
     expect(result.reasons.some((v) => v.includes('residual unmasked API_KEY'))).toBe(true);

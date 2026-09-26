@@ -744,7 +744,15 @@ describe('Semantic Redaction Protocol (SIH 2026 Problem Statement 171)', () => {
       { id: 'agent-1', tag: 'div', text: 'Order summary: [CARD]' },
     ];
 
-    const passResult = runSecurityBoundaryVerification(detected, redactionPadded, cleanDOM, 0.85);
+    // All three cases below model "detection ran and found something", so they
+    // must declare availability explicitly. Without it the verifier now fails
+    // safe (Cycle 1.1) and cases 2 and 3 would assert `false` for the wrong
+    // reason — the availability violation rather than the defect under test.
+    const DETECTION_RAN = { detectionAvailable: true } as const;
+
+    const passResult = runSecurityBoundaryVerification(detected, redactionPadded, cleanDOM, 0.85, DETECTION_RAN);
+    expect(passResult.detectionCheck.available).toBe(true);
+    expect(passResult.detectionCheck.state).toBe('detected');
     expect(passResult.passed).toBe(true);
     expect(passResult.coverageCheck.passed).toBe(true);
     expect(passResult.jsonSanitizationCheck.rawPIIFound).toBe(false);
@@ -753,7 +761,8 @@ describe('Semantic Redaction Protocol (SIH 2026 Problem Statement 171)', () => {
     const redactionGap = [
       { id: 'card_1', type: 'card', paddedBbox: [105, 105, 150, 20] as [number, number, number, number] }, // Too small!
     ];
-    const failCoverage = runSecurityBoundaryVerification(detected, redactionGap, cleanDOM, 0.85);
+    const failCoverage = runSecurityBoundaryVerification(detected, redactionGap, cleanDOM, 0.85, DETECTION_RAN);
+    expect(failCoverage.detectionCheck.available).toBe(true);
     expect(failCoverage.passed).toBe(false);
     expect(failCoverage.reasons.some((r) => r.includes('Coverage gap'))).toBe(true);
 
@@ -761,7 +770,8 @@ describe('Semantic Redaction Protocol (SIH 2026 Problem Statement 171)', () => {
     const dirtyDOM = [
       { id: 'agent-2', tag: 'span', text: 'Secret API key: sk-proj-a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6' },
     ];
-    const failLeak = runSecurityBoundaryVerification(detected, redactionPadded, dirtyDOM, 0.85);
+    const failLeak = runSecurityBoundaryVerification(detected, redactionPadded, dirtyDOM, 0.85, DETECTION_RAN);
+    expect(failLeak.detectionCheck.available).toBe(true);
     expect(failLeak.passed).toBe(false);
     expect(failLeak.jsonSanitizationCheck.rawPIIFound).toBe(true);
     expect(failLeak.reasons.some((r) => r.includes('residual unmasked API_KEY'))).toBe(true);

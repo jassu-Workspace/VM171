@@ -2306,27 +2306,68 @@ export async function captureAndRedact(): Promise<{
   ctx.drawImage(image, 0, 0);
 
   // PHASE 3: Local face detection via MediaPipe
+  //
+  // Cycle 1.1: an empty redaction list is AMBIGUOUS — it means either "no faces
+  // in this frame" or "the detector never ran". Three separate paths used to
+  // collapse into the same silent `[]`: engine load failure, a thrown error,
+  // and the 2.5s timeout. We now distinguish them so the verifier can refuse to
+  // certify a frame that was never scanned.
   let faceRedactions: Array<{ type: string; bbox: number[] }> = [];
+  let faceDegradeReason = '';
   try {
-    faceRedactions = await Promise.race([
+    // `null` is a timeout sentinel, distinct from a legitimate empty result.
+    const raced = await Promise.race([
       detectAndBlurFaces(canvas, ctx),
-      new Promise<Array<{ type: string; bbox: number[] }>>((res) => setTimeout(() => res([]), 2500)),
+      new Promise<Array<{ type: string; bbox: number[] }> | null>((res) =>
+        setTimeout(() => res(null), 2500)
+      ),
     ]);
-  } catch {
+    if (raced === null) {
+      faceDegradeReason = 'Face detection timed out after 2500ms.';
+      faceRedactions = [];
+    } else {
+      faceRedactions = raced;
+    }
+  } catch (err) {
+    faceDegradeReason = `Face detection threw: ${err instanceof Error ? err.message : String(err)}`;
     faceRedactions = [];
   }
   const redactions: Array<{ type: string; bbox: number[] }> = [...faceRedactions];
 
   // PHASE 4: Lightweight WASM OCR for image PII
+  //
+  // OCR is degraded-but-not-blocking: it is frequently blocked under the MV3
+  // CSP, and the independent plaintext sweep over `structuredDOM` still runs in
+  // the verifier. Face detection IS blocking, because an unblurred face is
+  // biometric data and no other control covers it.
+  let ocrDegradeReason = '';
   try {
-    const ocrRedactions = await Promise.race([
+    const raced = await Promise.race([
       scanImagesForPII(ctx),
-      new Promise<Array<{ type: string; bbox: number[] }>>((res) => setTimeout(() => res([]), 2500)),
+      new Promise<Array<{ type: string; bbox: number[] }> | null>((res) =>
+        setTimeout(() => res(null), 2500)
+      ),
     ]);
-    redactions.push(...ocrRedactions);
-  } catch {
-    // Silently continue without OCR redaction; blocked under MV3 CSP.
+    if (raced === null) {
+      ocrDegradeReason = 'Image OCR timed out after 2500ms.';
+    } else {
+      redactions.push(...raced);
+    }
+  } catch (err) {
+    ocrDegradeReason = `Image OCR threw: ${err instanceof Error ? err.message : String(err)}`;
   }
+
+  // Faces are the blocking signal; OCR contributes context to the reason.
+  const faceEngineLive = faceStatus === 'live';
+  const faceDegradation = faceDegradeReason || (faceEngineLive ? '' : 'MediaPipe FaceLandmarker is degraded (model/WASM unavailable).');
+  const detectionAvailable = faceEngineLive && faceDegradation === '';
+  const detectionReasonParts = [
+    faceDegradation,
+    ocrDegradeReason,
+  ].filter(Boolean);
+  const detectionReason = detectionReasonParts.length > 0
+    ? detectionReasonParts.join(' | ')
+    : `Face detection live; ${redactions.length} redaction(s) applied.`;
 
   // Screenshot may be device-pixel scaled vs DOM CSS coordinates; compute scale factor
   const scaleX = image.naturalWidth / Math.max(window.innerWidth, 1);
@@ -2383,7 +2424,8 @@ export async function captureAndRedact(): Promise<{
     scaledRegions,
     redactionMap,
     structuredDOM,
-    0.85
+    0.85,
+    { detectionAvailable, engineLoaded: faceEngineLive, reason: detectionReason }
   );
 
   if (!verification.passed) {

@@ -36,9 +36,41 @@ export interface SanitizedDomElement {
   value?: string;
 }
 
+/**
+ * Availability signal for the upstream detection engines.
+ *
+ * The verifier CANNOT distinguish "the page contains nothing sensitive" from
+ * "the detectors never ran" by inspecting the detection map alone — both arrive
+ * as `[]`. When the ONNX/MediaPipe engines fail to load they return an empty
+ * list, and the geometric check then compares `0 === 0` and vacuously passes,
+ * certifying an image that was never scanned.
+ *
+ * Callers MUST report this explicitly. Omitting it is treated as UNAVAILABLE
+ * (fail-safe), because a silent `true` default would restore the vacuous pass.
+ */
+export interface DetectionAvailability {
+  /** Did the detection engines actually execute this step? Strict `true` required. */
+  detectionAvailable?: boolean;
+  /**
+   * Did the engine report itself as loaded? `false` forces UNAVAILABLE even when
+   * `detectionAvailable` is true — an engine that claims to be loaded but yields
+   * no regions on an image-bearing step is not trustworthy evidence.
+   */
+  engineLoaded?: boolean;
+  /** Human-readable cause, surfaced to operators when a run degrades. */
+  reason?: string;
+}
+
+export type DetectionState = 'detected' | 'clean' | 'unavailable';
+
 export interface VerificationResult {
   passed: boolean;
   confidence: number;
+  detectionCheck: {
+    available: boolean;
+    state: DetectionState;
+    reason: string;
+  };
   coverageCheck: {
     totalSensitive: number;
     totalCovered: number;
@@ -114,10 +146,57 @@ export function runSecurityBoundaryVerification(
   detectionMap: SensitiveRegion[],
   redactionMap: RedactedRegion[],
   structuredDOM: SanitizedDomElement[],
-  confidenceThreshold: number = 0.85
+  confidenceThreshold: number = 0.85,
+  availability?: DetectionAvailability
 ): VerificationResult {
   const violations: string[] = [];
   const reasons: string[] = [];
+
+  // 0. Detection Availability — MUST be resolved before anything else.
+  //
+  // An empty detection map is ambiguous: it means either "nothing sensitive was
+  // found" or "the detectors never ran". Only the caller can tell us which.
+  // Anything other than an explicit `detectionAvailable: true` (or an engine
+  // that reports itself not loaded) is treated as UNAVAILABLE.
+  const availabilityReported =
+    availability !== null && typeof availability === 'object';
+
+  const detectionReportedAvailable =
+    availabilityReported && (availability as DetectionAvailability).detectionAvailable === true;
+
+  const engineReportedLoaded =
+    detectionReportedAvailable && (availability as DetectionAvailability).engineLoaded !== false;
+
+  const detectionAvailable = detectionReportedAvailable && engineReportedLoaded;
+
+  let detectionState: DetectionState;
+  let detectionReason: string;
+
+  if (!availabilityReported) {
+    detectionState = 'unavailable';
+    detectionReason =
+      'Detection availability was not reported by the caller. An empty detection map cannot be distinguished from detectors that never ran, so this frame is treated as unverified.';
+  } else if (!detectionReportedAvailable) {
+    detectionState = 'unavailable';
+    detectionReason =
+      (availability as DetectionAvailability).reason ||
+      'Detection engines did not report availability for this step. Frame treated as unverified.';
+  } else if (!engineReportedLoaded) {
+    detectionState = 'unavailable';
+    detectionReason =
+      (availability as DetectionAvailability).reason ||
+      'Detection engine reported itself not loaded. Frame treated as unverified.';
+  } else if (detectionMap.length > 0) {
+    detectionState = 'detected';
+    detectionReason = `Detection ran and reported ${detectionMap.length} sensitive region(s).`;
+  } else {
+    detectionState = 'clean';
+    detectionReason = 'Detection ran and found no sensitive regions.';
+  }
+
+  if (!detectionAvailable) {
+    violations.push(`Detection unavailable: ${detectionReason}`);
+  }
 
   // 1. Geometric Enclosure Verification
   let coveredCount = 0;
@@ -185,7 +264,12 @@ export function runSecurityBoundaryVerification(
 
   return {
     passed,
-    confidence: coverageCheckPassed ? 0.99 : 0.4,
+    confidence: detectionAvailable ? (coverageCheckPassed ? 0.99 : 0.4) : 0,
+    detectionCheck: {
+      available: detectionAvailable,
+      state: detectionState,
+      reason: detectionReason,
+    },
     coverageCheck: {
       totalSensitive: detectionMap.length,
       totalCovered: coveredCount,
