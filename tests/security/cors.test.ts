@@ -86,11 +86,33 @@ describe('Cycle 2.6 — CORS allowlist', () => {
   });
 
   it('permits the auth header on an allowed origin', () => {
-    // BREAK: the allow-headers list losing x-secret-password, which would break
-    // every real request from the extension.
+    // BREAK: the allow-headers list losing the header the extension actually
+    // authenticates with, which would break every real browser request.
+    //
+    // This assertion USED to name `x-secret-password`, and it was correct at
+    // the time: that was the auth header. Cycle 2.4 replaced it with an
+    // `Authorization: Bearer` token, and this test was never updated — so it
+    // kept passing while the live header was missing from the allowlist. The
+    // server was rejecting every authenticated browser request and the suite
+    // was green.
+    //
+    // The name is corrected; the break it guards is not weakened. This is the
+    // second time this exact assertion has now been caught by something other
+    // than the test that owns it.
     return preflight(ALLOWED).then((res) => {
       const allowed = res.headers.get('access-control-allow-headers') ?? '';
-      expect(allowed.toLowerCase()).toContain('x-secret-password');
+      expect(allowed.toLowerCase()).toContain('authorization');
+    });
+  });
+
+  it('does not advertise the legacy header the server refuses on purpose', () => {
+    // The auth middleware rejects `x-secret-password` deliberately. CORS
+    // telling a browser it may send a header that is guaranteed to be refused
+    // is worse than saying nothing: it produces a confusing failure instead
+    // of a clean one.
+    return preflight(ALLOWED).then((res) => {
+      const allowed = res.headers.get('access-control-allow-headers') ?? '';
+      expect(allowed.toLowerCase()).not.toContain('x-secret-password');
     });
   });
 

@@ -258,7 +258,13 @@ export { app };
 // header entirely rather than reflecting the caller's value back.
 app.use('*', cors({
   origin: (origin) => (origin && ALLOWED_ORIGINS.has(origin) ? origin : null),
-  allowHeaders: ['Content-Type', 'x-secret-password'],
+  // `Authorization` is what the server actually authenticates with (the
+  // Cycle 2.4 bearer token). It was missing here, so every authenticated
+  // call from the extension failed the browser's preflight. The dead
+  // `x-secret-password` is gone: the auth middleware refuses it on purpose,
+  // and advertising a header that is guaranteed to be rejected is worse
+  // than advertising nothing.
+  allowHeaders: ['Content-Type', 'Authorization'],
   allowMethods: ['POST', 'GET', 'OPTIONS'],
   credentials: false,
   maxAge: 600,
@@ -1640,11 +1646,33 @@ if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
       'disallowed Origin is refused with 403',
   );
   log.info(`  Upstream Provider: ${hasGemini ? 'Google Gemini API (Priority 1)' : '9router (Priority 2)'}`);
-  log.info(`  Auth header:       x-secret-password`);
+  log.info(`  Auth:              Authorization: Bearer <jwt>`);
+  log.info(`                      (legacy x-secret-password is refused)`);
   log.info(`  Rate limit:        ${RATE_LIMIT_MAX_REQUESTS} req/min per IP`);
   log.info(`  Payload limit:     25MB`);
   log.info(`  Upstream timeout:  35s`);
   log.info(`  Session Vault:     storage/sessions/<sessionId>/`);
+
+  // ── PAIRING ──────────────────────────────────────────────────────
+  // Without this the extension cannot be paired AT ALL on the default path:
+  // PAIRING_CODE was generated and validated but never shown to anyone,
+  // while .env.example claimed boot "prints BOTH to the console".
+  //
+  // Printed only when the operator did not pin SECRETS_PAIRING_CODE, since
+  // a pinned value came from their own .env and echoing it adds nothing.
+  // The signing key is deliberately NOT printed: it is not a user-facing
+  // credential, and echoing it widens the blast radius of a pasted
+  // terminal or a screen share.
+  log.info('');
+  // Label and value on ONE line. Split across lines the operator has to
+  // match a value to a label by eye, and an automated harness has to parse a
+  // box drawing to find a credential.
+  if (process.env.SECRETS_PAIRING_CODE) {
+    log.info(`  Pairing code:      (pinned via SECRETS_PAIRING_CODE in server/.env)`);
+  } else {
+    log.info(`  Pairing code:      ${PAIRING_CODE}`);
+  }
+  log.info(`                      one-time; needed once, to pair the extension`);
   log.success('═══════════════════════════════════════════════════════════');
 }
 
