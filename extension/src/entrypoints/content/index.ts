@@ -3,6 +3,7 @@
  * Queries interactive elements and masks PII from body text
  */
 import { browser } from 'wxt/browser';
+import { detectAnyLocale, summariseEvidence, DEFAULT_LOCALES } from '../../utils/completionEvidence';
 import { FaceLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
 import {
   ocrRecognize,
@@ -362,33 +363,40 @@ export function getMaskedDom(): string {
   // Apply PII masking across all 25 sensitive categories
   const maskedText = sanitizeStringPII(bodyText);
 
-  // Check for platform submission confirmation toasts/banners
-  const bodyTextLower = bodyText.toLowerCase();
-  const hasToastElement = Boolean(
-    document.querySelector('.artdeco-toast-item, [aria-label*="Post successful" i], a[href*="/feed/update/"]')
-  );
-  const hasConfirmationToast = hasToastElement || [
-    'post successful',
-    'view post',
-    'post published',
-    'post has been published',
-    'your post is now live',
-    'your post was shared',
-    'your post was sent',
-    'your tweet was sent',
-    'message sent',
-    'your message has been sent',
-    'email sent successfully',
-    'response has been recorded',
-    'form submitted successfully',
-    'thank you for your submission',
-    'submission confirmed',
-    'submission received',
-  ].some((phrase) => bodyTextLower.includes(phrase));
+  // Cycle 3.4 — COMPLETION EVIDENCE, NOT AN INSTRUCTION.
+  //
+  // This used to be a substring scan feeding a directive:
+  //     "--- SYSTEM NOTIFICATION: SUBMISSION CONFIRMED ... Conclude goal with
+  //      action: \"done\". ---"
+  //
+  // The condition for emitting that command was a match against PAGE TEXT. So
+  // any page containing "thank you for your submission" — a help article, a
+  // footer, a blog post about forms — could end the agent's run early. That is
+  // prompt injection aimed at run control, reachable from any site.
+  //
+  // What is emitted now is an OBSERVATION with a strength and a source, and the
+  // model is left to weigh it. Whether a `done` is justified is decided
+  // server-side, where page text cannot issue instructions.
+  const evidence = detectAnyLocale(bodyText, DEFAULT_LOCALES);
+  const evidenceSummary = summariseEvidence(evidence);
+  if (evidence.detected) {
+    console.log(
+      `[Evidence] ${evidence.strength} match in ${evidence.locale}: ${evidence.matchedText}` +
+        (evidence.vetoedBy ? ` (vetoed by failure text: ${evidence.vetoedBy})` : '')
+    );
+  }
 
-  const systemBanner = hasConfirmationToast
-    ? `\n--- SYSTEM NOTIFICATION: SUBMISSION CONFIRMED (Success notification detected on page). Conclude goal with action: "done". ---\n`
-    : '';
+  // The legacy English phrase list is DELETED, not retained. It was the
+  // source of the injection surface, and keeping a dead copy of it 'for
+  // documentation' would only invite someone to wire it back up. The
+  // replacement taxonomy lives in utils/completionEvidence.ts, which is
+  // locale-aware and negation-aware.
+
+  // The banner is now EVIDENCE, not a command. `systemBanner` keeps its name and
+  // its position so the prompt shape is unchanged, but nothing in it tells the
+  // model what action to take.
+  const systemBanner = `\n${evidenceSummary}`;
+
 
   // Summarize the most relevant interactive elements (up to 140) with enriched metadata
   // Retain elements that have either text or meta attributes (e.g. empty search inputs)
@@ -428,7 +436,11 @@ export function getMaskedDom(): string {
   return JSON.stringify({
     maskedText: fullMaskedText,
     elementMap,
-    submissionConfirmed: hasConfirmationToast,
+    // Cycle 3.4: this is now an OBSERVATION, not a verdict. The old field was
+    // a boolean named as though the page had confirmed submission; it now
+    // carries the evidence and its strength so a consumer can weigh it.
+    submissionConfirmed: evidence.detected && !evidence.vetoedBy,
+    completionEvidence: evidence,
   });
 }
 
