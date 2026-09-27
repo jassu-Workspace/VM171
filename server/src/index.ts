@@ -12,7 +12,7 @@ import { saveSessionStep, initSession, finalizeSession, getStorageStats, listSes
 import { validateImagePayload } from './imageSafety';
 import { originGuard, parseAllowedOrigins } from './originGuard';
 import { bodyLimit } from 'hono/body-limit';
-import { StepSchema } from './schemas';
+import { StepSchema, SessionInitSchema, SessionFinalizeSchema, SessionScreenshotSchema } from './schemas';
 import { parseActionResponse } from './responseSchema';
 import { evaluateAction } from './actionPolicy';
 import { resolveCompletion } from './completion';
@@ -538,10 +538,35 @@ app.get('/api/system-telemetry', (c) => {
  * Initialize session directory under storage/sessions/<sessionId>/
  */
 app.post('/api/session/init', async (c) => {
+  const clientIp = clientAddress(c);
+  let body: unknown;
   try {
-    const body = (await c.req.json()) as { sessionId?: string; task?: string };
-    const sessionId = body.sessionId || `session_${Date.now()}`;
-    const task = body.task || '';
+    body = await c.req.json();
+  } catch {
+    log.warn(`Invalid JSON body from ${clientIp} — 400 returned`);
+    return c.json({ error: 'Invalid JSON in request body.' }, 400);
+  }
+
+  // Cycle 2.9 (Task 3): one declared contract replaces the bare type assertion.
+  // `.strict()` means only declared keys are accepted.
+  const validated = SessionInitSchema.safeParse(body);
+  if (!validated.success) {
+    const first = validated.error.issues[0];
+    log.warn(
+      `Schema violation from ${clientIp} — 400 returned: ${first?.path.join('.') ?? '(root)'}: ${first?.message ?? 'invalid'}`
+    );
+    return c.json(
+      {
+        error: 'INVALID_REQUEST_SHAPE',
+        detail: first ? `${first.path.join('.') || '(root)'}: ${first.message}` : 'invalid payload',
+      },
+      400
+    );
+  }
+
+  try {
+    const sessionId = validated.data.sessionId || `session_${Date.now()}`;
+    const task = validated.data.task || '';
     initSession(sessionId, task);
     return c.json({ success: true, sessionId });
   } catch {
@@ -553,10 +578,35 @@ app.post('/api/session/init', async (c) => {
  * Finalize session metadata
  */
 app.post('/api/session/finalize', async (c) => {
+  const clientIp = clientAddress(c);
+  let body: unknown;
   try {
-    const body = (await c.req.json()) as { sessionId?: string; status?: 'completed' | 'aborted' | 'error'; summary?: string };
-    if (body.sessionId) {
-      finalizeSession(body.sessionId, body.status || 'completed', body.summary);
+    body = await c.req.json();
+  } catch {
+    log.warn(`Invalid JSON body from ${clientIp} — 400 returned`);
+    return c.json({ error: 'Invalid JSON in request body.' }, 400);
+  }
+
+  // Cycle 2.9 (Task 3): one declared contract replaces the bare type assertion.
+  // `.strict()` means only declared keys are accepted.
+  const validated = SessionFinalizeSchema.safeParse(body);
+  if (!validated.success) {
+    const first = validated.error.issues[0];
+    log.warn(
+      `Schema violation from ${clientIp} — 400 returned: ${first?.path.join('.') ?? '(root)'}: ${first?.message ?? 'invalid'}`
+    );
+    return c.json(
+      {
+        error: 'INVALID_REQUEST_SHAPE',
+        detail: first ? `${first.path.join('.') || '(root)'}: ${first.message}` : 'invalid payload',
+      },
+      400
+    );
+  }
+
+  try {
+    if (validated.data.sessionId) {
+      finalizeSession(validated.data.sessionId, 'completed', validated.data.summary);
     }
     return c.json({ success: true });
   } catch {
@@ -568,30 +618,49 @@ app.post('/api/session/finalize', async (c) => {
  * Direct image archiving endpoint for standalone or intermediate screenshots
  */
 app.post('/api/session/screenshot', async (c) => {
+  const clientIp = clientAddress(c);
+  let body: unknown;
   try {
-    const body = (await c.req.json()) as {
-      sessionId: string;
-      step?: number;
-      rawImage?: string;
-      maskedImage?: string;
-      vlmImage?: string;
-      task?: string;
-      vlmModel?: string;
-    };
-    if (!body.sessionId) {
+    body = await c.req.json();
+  } catch {
+    log.warn(`Invalid JSON body from ${clientIp} — 400 returned`);
+    return c.json({ error: 'Invalid JSON in request body.' }, 400);
+  }
+
+  // Cycle 2.9 (Task 3): one declared contract replaces the bare type assertion.
+  // `.strict()` means only declared keys are accepted.
+  const validated = SessionScreenshotSchema.safeParse(body);
+  if (!validated.success) {
+    const first = validated.error.issues[0];
+    log.warn(
+      `Schema violation from ${clientIp} — 400 returned: ${first?.path.join('.') ?? '(root)'}: ${first?.message ?? 'invalid'}`
+    );
+    return c.json(
+      {
+        error: 'INVALID_REQUEST_SHAPE',
+        detail: first ? `${first.path.join('.') || '(root)'}: ${first.message}` : 'invalid payload',
+      },
+      400
+    );
+  }
+
+  try {
+    const { sessionId, step: clientStep, image } = validated.data;
+    if (!sessionId) {
       return c.json({ error: 'sessionId is required' }, 400);
     }
-    const step = typeof body.step === 'number' ? body.step : 1;
+    const step = typeof clientStep === 'number' ? clientStep : 1;
+    const imagePayload = typeof image === 'string' ? image : undefined;
     saveSessionStep({
-      sessionId: body.sessionId,
+      sessionId,
       step,
-      task: body.task || 'Direct screenshot capture',
-      rawImage: body.rawImage,
-      maskedImage: body.maskedImage,
-      vlmImage: body.vlmImage || body.maskedImage || body.rawImage,
-      vlmModel: body.vlmModel || 'direct-capture',
+      task: 'Direct screenshot capture',
+      rawImage: imagePayload,
+      maskedImage: undefined,
+      vlmImage: imagePayload,
+      vlmModel: 'direct-capture',
     });
-    return c.json({ success: true, sessionId: body.sessionId, step });
+    return c.json({ success: true, sessionId, step });
   } catch (err) {
     return c.json({ error: 'Failed to archive screenshot', details: String(err) }, 500);
   }
