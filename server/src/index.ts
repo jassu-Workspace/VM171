@@ -1550,25 +1550,7 @@ app.post('/api/step', async (c) => {
 
   // Cycle 1.4: treat the client's redaction envelope as a CLAIM. The server
   // decides policy, and accounts for every step that was not verified.
-  const redactionVerdict = evaluateRedactionPolicy(
-    clientRedaction as RedactionEnvelopeInput | undefined,
-    REJECT_UNREDACTED
-  );
-  if (!redactionVerdict.accepted) {
-    log.warn(`[Redaction policy] Rejected step ${step} from ${clientIp}: ${redactionVerdict.error}`);
-    return c.json({ error: redactionVerdict.error }, redactionVerdict.status as 400);
-  }
-  if (redactionVerdict.degraded) {
-    recordDegradation(redactionTally, clientRedaction as RedactionEnvelopeInput | undefined);
-    log.warn(
-      `[Redaction policy] Step ${step} accepted DEGRADED (${redactionVerdict.state}): ${redactionVerdict.degradedReason}`
-    );
-  }
-
-  // Log payload sizes
-  log.info(`Step ${step} [${sessionId}] — task: ${task.length} chars, maskedDom: ${maskedDom.length} chars, redactedImage: ${imageBase64.length} chars, rawImage: ${typeof rawImage === 'string' ? rawImage.length : 0} chars, history: ${actionHistory.length} items`);
-
-  // ── Server-side redaction ────────────────────────────────────────────────
+  // ── Server-side redaction, BEFORE the policy gate ───────────────────────
   // The extension's own redaction cannot run: its models are dynamically
   // quantized and need `DynamicQuantizeLinear`, an operator present in no
   // onnxruntime-web build, and the WASM backend cannot initialise in an MV3
@@ -1576,19 +1558,30 @@ app.post('/api/step', async (c) => {
   // masking happens.
   //
   // This does NOT change what leaves the browser — the raw frame was already
-  // being posted to this loopback server. It changes WHERE the mask is
-  // applied, and it makes the server the authority: the client's redaction
-  // envelope is a claim, and this is the verification.
+  // being posted to this loopback server. It changes WHERE the mask is applied.
+  //
+  // ORDER MATTERS, and getting it wrong broke every step. This block used to
+  // sit AFTER evaluateRedactionPolicy, so with REJECT_UNREDACTED=true the gate
+  // rejected the step on the client's degraded envelope before the server had
+  // any chance to mask anything — producing
+  // "UNREDACTED_PAYLOAD_REJECTED" on every single request even though the
+  // server could and did redact successfully. The gate judges the CLIENT's
+  // claim; the server is what can actually fix a bad claim, so the server must
+  // act first and the gate must judge the result.
   let vlmImageForUpstream = finalVlmImage;
+  let serverMasked = false;
   if (SERVER_REDACTION && rawImage) {
     const masked = await redactOnServer(rawImage);
     if (masked.ok) {
       // An empty dataUrl means the detector found nothing to mask, which is a
       // legitimate clean frame — keep the original rather than sending "".
-      if (masked.dataUrl) vlmImageForUpstream = masked.dataUrl;
+      if (masked.dataUrl) {
+        vlmImageForUpstream = masked.dataUrl;
+        serverMasked = true;
+      }
       log.info(
         `Server redaction masked ${masked.regions} region(s) over ${masked.width}x${masked.height} ` +
-        `in ${masked.inferenceMs}ms — this frame is now provably redacted, not merely claimed to be`,
+        `in ${masked.inferenceMs}ms — this frame is provably redacted, not merely claimed to be`,
       );
     } else {
       log.error(
@@ -1608,6 +1601,31 @@ app.post('/api/step', async (c) => {
       }
     }
   }
+
+  // ── Redaction policy, judged on the SERVER's result ─────────────────────
+  // When the server masked the frame itself, the client's degraded envelope is
+  // no longer the deciding evidence — the server just produced a verified mask.
+  // Evaluating the client claim anyway would reject a step whose frame is in
+  // fact provably redacted, which is both wrong and unusable.
+  const redactionVerdict = evaluateRedactionPolicy(
+    serverMasked
+      ? ({ state: 'verified', engine: 'server-side', degradedAt: null, reason: 'Masked by the local server.', violations: [] } as RedactionEnvelopeInput)
+      : (clientRedaction as RedactionEnvelopeInput | undefined),
+    REJECT_UNREDACTED
+  );
+  if (!redactionVerdict.accepted) {
+    log.warn(`[Redaction policy] Rejected step ${step} from ${clientIp}: ${redactionVerdict.error}`);
+    return c.json({ error: redactionVerdict.error }, redactionVerdict.status as 400);
+  }
+  if (redactionVerdict.degraded) {
+    recordDegradation(redactionTally, clientRedaction as RedactionEnvelopeInput | undefined);
+    log.warn(
+      `[Redaction policy] Step ${step} accepted DEGRADED (${redactionVerdict.state}): ${redactionVerdict.degradedReason}`
+    );
+  }
+
+  // Log payload sizes
+  log.info(`Step ${step} [${sessionId}] — task: ${task.length} chars, maskedDom: ${maskedDom.length} chars, redactedImage: ${imageBase64.length} chars, rawImage: ${typeof rawImage === 'string' ? rawImage.length : 0} chars, history: ${actionHistory.length} items`);
 
   // Phase 3: the model reply is now schema-validated, exactly as the request
   // already was. The previous implementation stripped markdown fences,

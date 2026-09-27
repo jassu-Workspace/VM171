@@ -140,12 +140,24 @@ async function main() {
         maskedDom: '<input id="name"><input id="email"><input id="card">',
         rawImage: png,
         vlmImage: png,
-        redaction: { state: 'verified', engine: 'mediapipe', degradedAt: null, reason: 'client claim', violations: [] },
+        // The extension ALWAYS claims degraded: its redaction models cannot run.
+        redaction: { state: 'degraded', engine: 'mediapipe', degradedAt: '2026-09-27T00:00:00.000Z', reason: 'detection did not run', violations: [] },
         sessionId: 'e2e-redaction', step: 1,
       }),
     });
     const stepBody = await stepRes.text();
     console.log(`/api/step -> ${stepRes.status}`);
+    // The regression: with REJECT_UNREDACTED=true and a client that can only
+    // ever claim 'degraded', the step must still succeed because the SERVER
+    // masked the frame. Before the ordering fix this was a 400.
+    assert(
+      stepRes.status === 200,
+      `expected 200, got ${stepRes.status}: ${stepBody.slice(0, 300)}`,
+    );
+    assert(
+      !/UNREDACTED_PAYLOAD_REJECTED/.test(stepBody),
+      'the step was rejected on the client claim even though the server masked the frame',
+    );
 
     const maskedLog = /Server redaction masked (\d+) region/.exec(serverLog);
     assert(maskedLog, `server did not report masking:\n${serverLog.replace(/\x1b\[[0-9;]*m/g, '').slice(-1200)}`);
