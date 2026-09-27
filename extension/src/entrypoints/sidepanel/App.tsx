@@ -160,6 +160,54 @@ const App: React.FC = () => {
     refreshTargetTab();
   }, [refreshTargetTab]);
 
+  // ── Confirmation prompts ────────────────────────────────────────────────
+  // The agent refuses to act on a destructive step (post, send, share, delete,
+  // pay, transfer) until a human approves it. It waits in the background and
+  // declines if nobody answers within the timeout, so this panel is the only
+  // way such a step can ever proceed.
+  const [pendingConfirm, setPendingConfirm] = useState<{ requestId: string; label: string } | null>(
+    null,
+  );
+
+  useEffect(() => {
+    const onMessage = (msg: unknown) => {
+      const m = msg as { type?: string; payload?: { requestId?: string; label?: string } };
+      if (m?.type === 'CONFIRMATION_REQUEST' && m.payload?.requestId) {
+        setPendingConfirm({ requestId: m.payload.requestId, label: m.payload.label ?? 'this action' });
+      } else if (m?.type === 'CONFIRMATION_RESOLVED') {
+        setPendingConfirm(null);
+      }
+    };
+    try {
+      browser.runtime.onMessage.addListener(onMessage);
+    } catch {
+      // ignore — the agent will simply time out and decline
+    }
+    return () => {
+      try {
+        browser.runtime.onMessage.removeListener(onMessage);
+      } catch {
+        // ignore
+      }
+    };
+  }, []);
+
+  const answerConfirm = useCallback(async (confirmed: boolean) => {
+    const pending = pendingConfirm;
+    if (!pending) return;
+    // Clear immediately so the button cannot be double-fired while the reply
+    // is in flight. The background ignores a mismatched id regardless.
+    setPendingConfirm(null);
+    try {
+      await browser.runtime.sendMessage({
+        type: 'CONFIRM_RESPONSE',
+        payload: { confirmed, requestId: pending.requestId },
+      });
+    } catch {
+      // The prompt is gone either way; the agent declines if unanswered.
+    }
+  }, [pendingConfirm]);
+
   // Listen for tab switching so targetTab stays in sync
   useEffect(() => {
     const handleTabActivated = () => {
@@ -272,6 +320,51 @@ const App: React.FC = () => {
 
   return (
     <div className="flex flex-col h-screen bg-champagne-base dark:bg-royal-navy-950 text-royal-navy-900 dark:text-gray-100 font-sans select-none overflow-hidden transition-colors duration-200">
+      {/* ══════════ CONFIRMATION PROMPT ══════════
+          Rendered above everything else and NOT dismissible. The agent is
+          parked in the background waiting for this answer and will decline on
+          timeout, so it has to be unmissable rather than a quiet toast. */}
+      {pendingConfirm && (
+        <div
+          role="alertdialog"
+          aria-modal="true"
+          aria-labelledby="confirm-heading"
+          className="px-3.5 py-3 bg-amber-50 dark:bg-amber-950/60 border-b-2 border-amber-500 dark:border-amber-600 flex flex-col gap-2.5"
+        >
+          <div className="flex items-start gap-2">
+            <svg className="w-4 h-4 mt-0.5 shrink-0 text-amber-600 dark:text-amber-400" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M12 2L1 21h22L12 2zm0 15h-2v-2h2v2zm0-4h-2V9h2v4z" />
+            </svg>
+            <div className="min-w-0">
+              <h2 id="confirm-heading" className="text-xs font-bold text-amber-900 dark:text-amber-200">
+                Approval required
+              </h2>
+              <p className="text-[11px] leading-snug text-amber-800 dark:text-amber-300 mt-0.5 break-words">
+                The agent wants to perform an action it cannot do unattended. Nothing has happened yet.
+              </p>
+            </div>
+          </div>
+          <div className="text-[11px] font-mono px-2 py-1.5 rounded bg-amber-100/70 dark:bg-black/30 border border-amber-300 dark:border-amber-800 break-words">
+            {pendingConfirm.label}
+          </div>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={() => void answerConfirm(true)}
+              className="flex-1 px-3 py-1.5 text-xs font-semibold rounded bg-amber-600 hover:bg-amber-700 text-white transition-colors"
+            >
+              Approve
+            </button>
+            <button
+              type="button"
+              onClick={() => void answerConfirm(false)}
+              className="flex-1 px-3 py-1.5 text-xs font-semibold rounded bg-transparent hover:bg-amber-100 dark:hover:bg-amber-900/50 text-amber-800 dark:text-amber-300 border border-amber-500 dark:border-amber-700 transition-colors"
+            >
+              Decline
+            </button>
+          </div>
+        </div>
+      )}
       {/* ================= TOP EXECUTIVE HEADER ================= */}
       <header className="px-3.5 py-2.5 bg-champagne-surface dark:bg-royal-navy-900 border-b border-champagne-border dark:border-royal-navy-800 flex items-center justify-between shadow-sm">
         <div className="flex items-center space-x-2">

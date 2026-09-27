@@ -111,18 +111,95 @@ export function describeAction(action: Record<string, unknown>): string {
  * Resolves false on ANY failure — a closed port, a crashed view, a timeout —
  * because the safe default for a confirmation you cannot deliver is to not act.
  */
+/**
+ * The confirmation currently awaiting an answer, if any.
+ *
+ * Held as module state rather than threaded through the call so the message
+ * handler can answer it. `resolve` is attached once the waiter is listening,
+ * so an answer that arrives in the same tick as the request is not lost.
+ */
+interface PendingConfirmation {
+  requestId: string;
+  label: string;
+  resolve: ((accepted: boolean) => void) | null;
+}
+let pendingConfirmation: PendingConfirmation | null = null;
+
+/**
+ * How long to wait for a human before declining. Long enough to read a prompt
+ * and answer it, short enough that a forgotten sidepanel does not leave the
+ * agent parked indefinitely.
+ */
+const CONFIRMATION_TIMEOUT_MS = 120_000;
+
+/**
+ * Apply the operator's answer. An answer whose requestId does not match the
+ * pending prompt is IGNORED and logged, not applied — a stale reply must never
+ * approve an action the operator was not shown.
+ */
+export function answerConfirmation(requestId: string, confirmed: boolean): boolean {
+  const pending = pendingConfirmation;
+  if (!pending) {
+    console.warn('[Confirmation] answer arrived with no prompt pending; ignoring.');
+    return false;
+  }
+  if (pending.requestId !== requestId) {
+    console.warn('[Confirmation] answer did not match the pending prompt; ignoring.');
+    return false;
+  }
+  pendingConfirmation = null;
+  pending.resolve?.(confirmed);
+  return true;
+}
+
+/** The prompt awaiting an answer, for a UI that opens after the request. */
+export function getPendingConfirmation(): { requestId: string; label: string } | null {
+  return pendingConfirmation
+    ? { requestId: pendingConfirmation.requestId, label: pendingConfirmation.label }
+    : null;
+}
+
 export async function requestHumanConfirmation(label: string): Promise<boolean> {
+  // Correlate the prompt with its answer. Without an id, a reply that arrives
+  // after the agent has moved on to a different destructive step would approve
+  // THAT step instead — the operator never saw it. An unmatched reply is
+  // dropped and treated as a decline.
+  const requestId = `cfm-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  pendingConfirmation = { requestId, label, resolve: null };
+
+  // Tell any open UI to prompt. This is a broadcast, not a request/response:
+  // if nothing is listening the agent still waits below, and the timeout
+  // still declines. Failing closed is the point.
   try {
-    const response = (await Promise.race([
-      browser.runtime.sendMessage({ type: 'REQUEST_CONFIRMATION', payload: { label } }),
-      new Promise<{ confirmed: boolean }>((res) =>
-        setTimeout(() => res({ confirmed: false }), 60_000)
-      ),
-    ])) as { confirmed?: boolean };
-    return response?.confirmed === true;
+    browser.runtime
+      .sendMessage({ type: 'CONFIRMATION_REQUEST', payload: { label, requestId } })
+      .catch(() => {});
+  } catch {
+    // No UI open. Not an error — the wait below still applies.
+  }
+
+  try {
+    const accepted = await Promise.race([
+      new Promise<boolean>((resolve) => {
+        if (pendingConfirmation) pendingConfirmation.resolve = resolve;
+      }),
+      // Unchanged in spirit: a confirmation that cannot be delivered is a
+      // decline. The difference is that it can now actually be delivered.
+      new Promise<boolean>((res) => setTimeout(() => res(false), CONFIRMATION_TIMEOUT_MS)),
+    ]);
+    return accepted;
   } catch (err) {
     console.error('[Confirmation] request failed, defaulting to decline:', err);
     return false;
+  } finally {
+    pendingConfirmation = null;
+    try {
+      browser.runtime
+        .sendMessage({ type: 'CONFIRMATION_RESOLVED', payload: { requestId } })
+        .catch(() => {});
+    } catch {
+      // No UI open; nothing to clear.
+    }
   }
 }
 const STEP_DELAY_MS = 2500;
@@ -1968,6 +2045,15 @@ export default defineBackground(() => {
       return false;
     }
     const message = parsed.data;
+
+    // The operator's answer to a confirmation prompt. This is the message that
+    // was missing: without a handler here, a gated action could only ever time
+    // out and decline, because nothing could reply.
+    if (message.type === 'CONFIRM_RESPONSE') {
+      const applied = answerConfirmation(message.payload.requestId, message.payload.confirmed);
+      sendResponse({ success: applied });
+      return false;
+    }
 
     // PHASE 1 — Dashboard telemetry poll. Must stay synchronous (no async work)
     // so the dashboard's 1s setInterval never hangs.

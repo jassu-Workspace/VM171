@@ -111,7 +111,72 @@ export const StartAgentMessageSchema = z
   })
   .strict();
 
+/* ---------------------------------------------------------------------------
+ * Confirmation Messages
+ *
+ * The agent refuses to act on a destructive step until a human approves it.
+ * That approval has to be a real, deliverable round trip:
+ *
+ *   background -> REQUEST_CONFIRMATION  (a prompt is opened)
+ *   sidepanel  -> CONFIRM_RESPONSE      (the operator answers)
+ *
+ * Both halves were missing. `requestHumanConfirmation` sent the first message
+ * and nothing listened for it, and neither type existed in the validated
+ * unions, so the request would also have been rejected at the message
+ * boundary. The result was that every gated action — post, send, share,
+ * delete, pay, transfer, and the rest — could only ever time out and decline.
+ * Failing closed is correct, but it made the gate unusable rather than safe.
+ * ------------------------------------------------------------------------- */
+
+/** Background broadcasts a prompt to any open UI. */
+export const ConfirmationRequestMessageSchema = z
+  .object({
+    type: z.literal('CONFIRMATION_REQUEST'),
+    payload: z.object({
+      label: z.string().max(256),
+      // Correlates the prompt with its answer. The sidepanel cannot render or
+      // dismiss a prompt without one, and the background ignores a reply whose
+      // id does not match, so a stale answer cannot approve a later action.
+      requestId: z.string().max(64),
+    }).strict(),
+  })
+  .strict();
+
+/** Sidepanel -> background: the operator approved or declined. */
+export const ConfirmResponseMessageSchema = z
+  .object({
+    type: z.literal('CONFIRM_RESPONSE'),
+    payload: z.object({
+      confirmed: z.boolean(),
+      // Correlates the answer with the prompt, so a late reply cannot approve a
+      // DIFFERENT action the agent has since moved on to.
+      requestId: z.string().max(64),
+    }).strict(),
+  })
+  .strict();
+
+/** Background -> sidepanel: clear a prompt the operator has already answered. */
+export const ConfirmationResolvedMessageSchema = z
+  .object({
+    type: z.literal('CONFIRMATION_RESOLVED'),
+    payload: z.object({ requestId: z.string().max(64) }).strict(),
+  })
+  .strict();
+
 export const BackgroundMessageSchema = z.discriminatedUnion('type', [
+  // The request/response pair that was MISSING: a sidepanel that cannot be
+  // told to prompt, and a reply the background cannot receive, together made
+  // every gated action unreachable — it could only time out and decline.
+  //   CONFIRMATION_REQUEST   background -> sidepanel  "approve this?"
+  //   CONFIRM_RESPONSE       sidepanel -> background  "yes" / "no"
+  //   CONFIRMATION_RESOLVED  background -> sidepanel  clear the prompt
+  //
+  // Note there is deliberately no REQUEST_CONFIRMATION message. The original
+  // code sent one and awaited its reply, but nothing listened; keeping the type
+  // registered would imply a path that does not exist. The prompt is a
+  // broadcast and the answer is a separate message, which is what the two
+  // halves actually need.
+  ConfirmResponseMessageSchema,
   GetTelemetryMessageSchema,
   GetModelStatusMessageSchema,
   CaptureTabMessageSchema,
@@ -345,6 +410,10 @@ export const SidepanelMessageSchema = z.discriminatedUnion('type', [
   ScratchpadUpdateMessageSchema,
   AgentStatusMessageSchema,
   AgentActivityMessageSchema,
+  // The prompt itself and its dismissal. Without these the sidepanel has no
+  // way to learn that approval is being asked for.
+  ConfirmationRequestMessageSchema,
+  ConfirmationResolvedMessageSchema,
 ]);
 
 export type LogUpdateMessage = z.infer<typeof LogUpdateMessageSchema>;

@@ -21,6 +21,12 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 type BackgroundModule = {
   describeAction: (a: Record<string, unknown>) => string;
   requestHumanConfirmation: (label: string) => Promise<boolean>;
+  // The real reply path. A decline or approval is NOT a reply to the prompt
+  // broadcast — it is a separate CONFIRM_RESPONSE message routed to
+  // answerConfirmation, correlated by requestId. These are exported so the
+  // tests can drive that path rather than fabricating a reply.
+  answerConfirmation: (requestId: string, confirmed: boolean) => boolean;
+  getPendingConfirmation: () => { requestId: string; label: string } | null;
 };
 
 let mod: BackgroundModule;
@@ -62,40 +68,87 @@ describe('Cycle 3.2 — action descriptions are human-readable', () => {
 });
 
 describe('Cycle 3.2 — a confirmation that cannot be delivered is a decline', () => {
-  it('resolves true when the operator confirms', async () => {
-    const sendMessage = vi.fn().mockResolvedValue({ confirmed: true });
-    (globalThis as unknown as { chrome: { runtime: { sendMessage: unknown } } }).chrome.runtime.sendMessage =
-      sendMessage;
+  // NOTE ON WHAT WAS HERE BEFORE
+  //
+  // Three cases mocked `sendMessage` to resolve `{ confirmed: true }` and
+  // asserted requestHumanConfirmation returned true. That passed while the
+  // feature was completely unreachable: the real message was never sent by
+  // anything, nothing listened, and no reply type existed. A test that
+  // fabricates the reply proves only that the function READS a reply.
+  //
+  // The cases below drive the REAL path — a CONFIRM_RESPONSE routed to
+  // answerConfirmation and correlated by requestId. See also
+  // confirmationRoundTrip.test.ts, which asserts the message plumbing exists.
 
-    await expect(mod.requestHumanConfirmation('click → Place order')).resolves.toBe(true);
+  it('resolves false when the broadcast fails', async () => {
+    // BREAK, AND THE POINT: a closed port or a crashed view must fail SAFE.
+    // Treating an undeliverable confirmation as consent inverts the whole
+    // control. The prompt is a broadcast now, so this is about the broadcast
+    // failing — the wait below must still decline.
+    vi.useFakeTimers();
+    try {
+      const sendMessage = vi.fn().mockRejectedValue(new Error('Receiving end does not exist'));
+      (globalThis as unknown as { chrome: { runtime: { sendMessage: unknown } } }).chrome.runtime.sendMessage =
+        sendMessage;
+
+      // No answer arrives, so this settles via the timeout -> decline.
+      const pending = mod.requestHumanConfirmation('click → Delete account');
+      await vi.advanceTimersByTimeAsync(130_000);
+      await expect(pending).resolves.toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('resolves false when the operator declines', async () => {
-    const sendMessage = vi.fn().mockResolvedValue({ confirmed: false });
+    // A real decline travels back as CONFIRM_RESPONSE, not as a reply to the
+    // broadcast. Driving it through the real handler is the point: mocking
+    // sendMessage to return a fabricated reply is what hid that no listener
+    // existed.
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
     (globalThis as unknown as { chrome: { runtime: { sendMessage: unknown } } }).chrome.runtime.sendMessage =
       sendMessage;
 
-    await expect(mod.requestHumanConfirmation('click → Place order')).resolves.toBe(false);
+    const pending = mod.requestHumanConfirmation('x');
+    // Let the request register before answering it.
+    await vi.waitFor(() => expect(mod.getPendingConfirmation()).not.toBeNull());
+
+    const { requestId } = mod.getPendingConfirmation()!;
+    expect(mod.answerConfirmation(requestId, false)).toBe(true);
+    await expect(pending).resolves.toBe(false);
   });
 
-  it('resolves false when the request throws', async () => {
-    // BREAK, AND THE POINT: a closed port or a crashed view must fail SAFE.
-    // Treating an undeliverable confirmation as consent inverts the whole
-    // control.
-    const sendMessage = vi.fn().mockRejectedValue(new Error('Receiving end does not exist'));
+  it('resolves true when the operator approves', async () => {
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
     (globalThis as unknown as { chrome: { runtime: { sendMessage: unknown } } }).chrome.runtime.sendMessage =
       sendMessage;
 
-    await expect(mod.requestHumanConfirmation('click → Delete account')).resolves.toBe(false);
+    const pending = mod.requestHumanConfirmation('click → Post');
+    await vi.waitFor(() => expect(mod.getPendingConfirmation()).not.toBeNull());
+
+    const { requestId } = mod.getPendingConfirmation()!;
+    expect(mod.answerConfirmation(requestId, true)).toBe(true);
+    await expect(pending).resolves.toBe(true);
   });
 
-  it('resolves false on a malformed reply', async () => {
-    // BREAK: a truthy check on the response object accepting `{confirmed: 'no'}`.
-    const sendMessage = vi.fn().mockResolvedValue({});
+  it('ignores an answer that does not match the pending prompt', async () => {
+    // A stale reply must never approve an action the operator was not shown.
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
     (globalThis as unknown as { chrome: { runtime: { sendMessage: unknown } } }).chrome.runtime.sendMessage =
       sendMessage;
 
-    await expect(mod.requestHumanConfirmation('x')).resolves.toBe(false);
+    const pending = mod.requestHumanConfirmation('click → Post');
+    await vi.waitFor(() => expect(mod.getPendingConfirmation()).not.toBeNull());
+
+    expect(mod.answerConfirmation('cfm-someone-elses-prompt', true)).toBe(false);
+    // Still pending, so the correct answer still works.
+    const { requestId } = mod.getPendingConfirmation()!;
+    expect(mod.answerConfirmation(requestId, true)).toBe(true);
+    await expect(pending).resolves.toBe(true);
+  });
+
+  it('ignores an answer when nothing is pending', async () => {
+    expect(mod.answerConfirmation('cfm-nothing', true)).toBe(false);
   });
 
   it('declines when the operator never answers', async () => {
@@ -107,7 +160,16 @@ describe('Cycle 3.2 — a confirmation that cannot be delivered is a decline', (
         sendMessage;
 
       const pending = mod.requestHumanConfirmation('click → Pay');
-      await vi.advanceTimersByTimeAsync(61_000);
+      // Not yet expired — the operator is still within their window. Proving
+      // the negative matters as much as the timeout: a prompt that resolved
+      // immediately would be consent-by-default.
+      let settled = false;
+      void pending.then(() => { settled = true; });
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(settled, 'must still be waiting, not auto-approved').toBe(false);
+
+      // Past CONFIRMATION_TIMEOUT_MS (120s), silence is a decline.
+      await vi.advanceTimersByTimeAsync(70_000);
       await expect(pending).resolves.toBe(false);
     } finally {
       vi.useRealTimers();

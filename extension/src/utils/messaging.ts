@@ -149,9 +149,17 @@ export interface UiMessageMap {
   SCRATCHPAD_UPDATE: { payload: Record<string, unknown> };
   GET_TELEMETRY: { request: Record<string, never>; response: Record<string, unknown> };
   /** Cycle 3.2: the operator's answer to an irreversible-action prompt. */
-  REQUEST_CONFIRMATION: {
-    payload: { label: string };
-    response: { confirmed: boolean };
+  // Background -> UI broadcast, and the UI's reply. Kept adjacent because
+  // they are two halves of one round trip; `REQUEST_CONFIRMATION` was removed
+  // because nothing listened for it and the reply it implied could not exist.
+  CONFIRMATION_REQUEST: {
+    payload: { label: string; requestId: string };
+  };
+  CONFIRM_RESPONSE: {
+    payload: { confirmed: boolean; requestId: string };
+  };
+  CONFIRMATION_RESOLVED: {
+    payload: { requestId: string };
   };
 }
 
