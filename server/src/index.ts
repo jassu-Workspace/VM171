@@ -1481,16 +1481,33 @@ app.post('/api/step', async (c) => {
           const controller = new AbortController();
           const timeoutId = setTimeout(() => controller.abort(), 35_000);
 
-          const completion = await geminiClient.chat.completions.create({
-            model,
-            messages: [
-              { role: 'system', content: systemPrompt },
-              { role: 'user', content: userContent },
-            ],
-            max_tokens: MAX_OUTPUT_TOKENS,
-            // @ts-expect-error signal is supported
-            signal: controller.signal,
-          });
+          const completion = await geminiClient.chat.completions.create(
+            {
+              model,
+              messages: [
+                { role: 'system', content: systemPrompt },
+                { role: 'user', content: userContent },
+              ],
+              max_tokens: MAX_OUTPUT_TOKENS,
+            },
+            // Request options go in the SECOND argument, not the body.
+            //
+            // Passing `signal` in the first argument — which the old code did,
+            // under a `@ts-expect-error` that silenced exactly the compiler
+            // warning which would have caught it — makes the SDK serialise the
+            // AbortSignal into the JSON payload. Gemini's REST API rejects an
+            // unknown top-level field outright:
+            //
+            //   400 INVALID_ARGUMENT  Unknown name "signal": Cannot find field.
+            //
+            // Reproduced against the live endpoint: the same request without
+            // `signal` returns a normal error, and with it returns that 400.
+            // Every Gemini candidate therefore failed on shape rather than on
+            // credentials, and the run fell through to the 502 path. The
+            // 35-second abort still works; it is a transport option, not a
+            // model parameter.
+            { signal: controller.signal },
+          );
 
           clearTimeout(timeoutId);
 
@@ -1533,16 +1550,20 @@ app.post('/api/step', async (c) => {
           const controller = new AbortController();
           const timeoutId = setTimeout(() => controller.abort(), 35_000);
 
-          const completion = await routerClient.chat.completions.create({
-            model,
-            messages: [
-              { role: 'system', content: systemPrompt },
-              { role: 'user', content: userContent },
-            ],
-            max_tokens: MAX_OUTPUT_TOKENS,
-            // @ts-expect-error signal is supported
-            signal: controller.signal,
-          });
+          const completion = await routerClient.chat.completions.create(
+            {
+              model,
+              messages: [
+                { role: 'system', content: systemPrompt },
+                { role: 'user', content: userContent },
+              ],
+              max_tokens: MAX_OUTPUT_TOKENS,
+            },
+            // Second argument, not the body — see the identical fix on the
+            // Gemini call above. `signal` is a transport option; putting it in
+            // the payload serialises it into the JSON request.
+            { signal: controller.signal },
+          );
 
           clearTimeout(timeoutId);
 
