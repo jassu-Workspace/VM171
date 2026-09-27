@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import * as os from 'node:os';
-import { saveSessionStep, initSession, finalizeSession, getStorageStats, listSessions, getSessionDetails } from './sessionStorage';
+import { saveSessionStep, initSession, finalizeSession, getStorageStats, listSessions, getSessionDetails, pruneSessions } from './sessionStorage';
 import { validateImagePayload } from './imageSafety';
 import { originGuard, parseAllowedOrigins } from './originGuard';
 import { bodyLimit } from 'hono/body-limit';
@@ -1772,6 +1772,15 @@ const bindHost = resolveBindHost();
 
 let server: any = null;
 if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
+  try {
+    const pruned = pruneSessions();
+    if (pruned.removed > 0) {
+      log.info(`Session retention: pruned ${pruned.removed} expired session(s) (${pruned.remaining} remaining).`);
+    }
+  } catch (err) {
+    log.warn(`Session retention prune failed on startup: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
   server = serve({
     fetch: app.fetch,
     port,
@@ -1840,6 +1849,16 @@ if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
 
 function shutdown(signal: string): void {
   log.warn(`Received ${signal} — shutting down gracefully...`);
+  if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
+    try {
+      const pruned = pruneSessions();
+      if (pruned.removed > 0) {
+        log.info(`Session retention: pruned ${pruned.removed} expired session(s) (${pruned.remaining} remaining).`);
+      }
+    } catch (err) {
+      log.warn(`Session retention prune failed during shutdown: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
   server?.close?.(() => {
     log.info('Server closed cleanly.');
     process.exit(0);
