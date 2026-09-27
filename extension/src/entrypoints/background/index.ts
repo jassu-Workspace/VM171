@@ -41,7 +41,24 @@ import { BackgroundMessageSchema } from '../../types/messages';
 
 // ONNX Runtime Web configuration: single-threaded WASM fallback,
 // safe for MV3 service workers where SharedArrayBuffer is unavailable.
+//
+// wasmPaths is REQUIRED, not optional. Without it ORT resolves its runtime
+// through XMLHttpRequest, and an MV3 service worker has no XMLHttpRequest at
+// all — the runtime aborts with "XMLHttpRequest is not defined" and every
+// model silently degrades. That is not cosmetic: these models are what mask
+// PII, so a degraded load means the frame is NOT being redacted, while the
+// agent reports itself as ready.
+//
+// The files are copied into the bundle by scripts/copy-assets.mjs and served
+// from the extension origin, which is why this is an absolute chrome-extension
+// path rather than a CDN URL. A remote path would also break the zero-egress
+// claim, since the runtime would be fetched off-origin.
+const ORT_WASM_DIR = 'ort/';
 ort.env.wasm.numThreads = 1;
+ort.env.wasm.wasmPaths = {
+  wasm: browser.runtime.getURL(`${ORT_WASM_DIR}ort-wasm-simd-threaded.wasm`),
+  mjs: browser.runtime.getURL(`${ORT_WASM_DIR}ort-wasm-simd-threaded.mjs`),
+};
 
 console.log('🛰 Background script initialized');
 

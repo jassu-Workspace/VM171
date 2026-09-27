@@ -81,8 +81,23 @@ const DESTRUCTIVE_VERBS: readonly RegExp[] = [
   /\b(accept|agree|authorize|approve|sign)\b/i,
 ];
 
-/** Fields a model might carry the human-readable target in. */
-const TEXT_FIELDS = ['target', 'value', 'selector', 'text', 'id', 'thought', 'reason'] as const;
+/**
+ * Fields that name the CONTROL BEING OPERATED.
+ *
+ * `thought` and `reason` were included here and that was a defect. Those
+ * fields are the model's own narration — "I should post something", "this
+ * page explains wire transfers" — and matching destructive verbs against
+ * commentary gates actions that touch nothing irreversible. Concretely, a
+ * `navigate` to a blog post ABOUT posting was gated because the model's
+ * summary mentioned posting.
+ *
+ * What matters is which control is being operated, and that is carried by the
+ * selector/id/target/value. The action type is matched separately below.
+ *
+ * This NARROWS what is gated; it never widens it. Clicking a button labelled
+ * "Delete" or "Post" is still gated, because the label is in the selector.
+ */
+const TEXT_FIELDS = ['target', 'value', 'selector', 'text', 'id'] as const;
 
 export type ActionRisk = 'safe' | 'caution' | 'dangerous';
 

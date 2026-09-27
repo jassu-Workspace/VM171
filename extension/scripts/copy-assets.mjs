@@ -78,6 +78,42 @@ async function main() {
     }
   }
 
+  // The onnxruntime-web WASM runtime, copied out of node_modules.
+  //
+  // This was missing entirely, which is why every model degraded in the
+  // service worker. ORT resolves its runtime lazily from wasmPaths; the paths
+  // were never set, so it fell back to XMLHttpRequest, which an MV3 service
+  // worker does not have ("XMLHttpRequest is not defined"). The models then
+  // silently failed to load — meaning PII was NOT being masked while the UI
+  // reported the agent as ready.
+  //
+  // Only the single-threaded build is taken. numThreads is 1 because
+  // SharedArrayBuffer is unavailable without cross-origin isolation, and the
+  // asyncify/jsep/jspi variants are for features this extension does not use.
+  const ORT_SRC = join(ROOT, 'node_modules', 'onnxruntime-web', 'dist');
+  const ORT_DEST = join(OUTPUT_DIR, 'ort');
+  const ORT_FILES = ['ort-wasm-simd-threaded.wasm', 'ort-wasm-simd-threaded.mjs'];
+  if (await fileExists(ORT_SRC)) {
+    if (await fileExists(ORT_DEST)) {
+      await rm(ORT_DEST, { recursive: true, force: true });
+    }
+    await mkdir(ORT_DEST, { recursive: true });
+    console.log('  [copy] ort/');
+    for (const name of ORT_FILES) {
+      const src = join(ORT_SRC, name);
+      if (await fileExists(src)) {
+        await copyFile(src, join(ORT_DEST, name));
+        totalCopied += 1;
+      } else {
+        // Loud, not silent: a missing runtime is a privacy failure, because
+        // the models that mask PII cannot load without it.
+        console.warn(`  [warn] ${name} missing from onnxruntime-web — models will degrade`);
+      }
+    }
+  } else {
+    console.warn('  [warn] onnxruntime-web not installed — models will degrade');
+  }
+
   console.log(`\n✅ copy-assets complete. ${totalCopied} files copied.`);
 }
 

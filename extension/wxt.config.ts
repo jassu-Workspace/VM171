@@ -62,6 +62,13 @@ export default defineConfig({
     },
     web_accessible_resources: [
       {
+        // The onnxruntime-web WASM runtime. The service worker loads it via
+        // ort.env.wasm.wasmPaths, which resolves against the extension origin;
+        // without this the runtime 404s and every redaction model degrades.
+        resources: ['ort/*'],
+        matches: ['<all_urls>'],
+      },
+      {
         resources: ['onnx/*'],
         matches: ['<all_urls>'],
       },
