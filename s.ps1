@@ -128,6 +128,46 @@ try {
     }
     Write-Ok "server/.env validated (SECRET_PASSWORD + provider)."
 
+    # ── PHASE B2: optional overrides, reported not enforced ────────────────
+    #
+    # These all have working defaults, so a missing value is not an error. They
+    # are surfaced because the ones that bound cost and retention are the sort of
+    # setting an operator forgets exists until a bill or a full disk arrives.
+    #
+    # Previously this script said nothing about them, which is why
+    # RATE_LIMIT_MAX_REQUESTS, MAX_SESSIONS, SESSION_RETENTION_DAYS and
+    # LOG_FORMAT sat in .env.example being read by nothing at all. They are
+    # wired now; this block exists so the script reflects the real surface.
+    $optional = @(
+        @{ Name = 'MAX_OUTPUT_TOKENS';     Note = 'provider output ceiling per call (default 4096)' },
+        @{ Name = 'RATE_LIMIT_MAX_REQUESTS'; Note = 'requests per window per IP (default 40)' },
+        @{ Name = 'SESSION_RETENTION_DAYS';  Note = 'age-based session prune (default 7)' },
+        @{ Name = 'MAX_SESSIONS';            Note = 'count-based session prune (default 100)' },
+        @{ Name = 'LOG_FORMAT';              Note = 'json | pretty (default pretty)' }
+    )
+    $unset = @()
+    foreach ($o in $optional) {
+        $pattern = '(?m)^\s*' + [regex]::Escape($o.Name) + '\s*=\s*(\S+)'
+        if ($envContent -match $pattern) {
+            $val = $Matches[1]
+            Write-Ok ("{0} = {1}   ({2})" -f $o.Name, $val, $o.Note)
+        } else {
+            $unset += $o.Name
+        }
+    }
+    if ($unset.Count -gt 0) {
+        Write-Host "        defaults in use: $($unset -join ', ')" -ForegroundColor DarkGray
+    }
+
+    # A non-loopback HOST is refused by the server at boot. Warn here, where the
+    # operator is still reading, rather than letting them find it in a log.
+    if ($envContent -match '(?m)^\s*HOST\s*=\s*(\S+)') {
+        $hostVal = $Matches[1]
+        if ($hostVal -notin @('127.0.0.1', 'localhost', '::1', '[::1]')) {
+            Write-Warn "HOST=$hostVal is not loopback. The server will REFUSE it and bind 127.0.0.1 anyway."
+        }
+    }
+
     # ── PHASE C: build and verify ───────────────────────────────────────────
     if (-not $SkipBuild) {
         Write-Step "PHASE C  Production build"

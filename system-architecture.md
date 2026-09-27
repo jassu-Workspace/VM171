@@ -54,7 +54,9 @@ The Agentic Router (The Brain): This is where the magic happens. It takes the ma
 
 The Telemetry \& Billing Engine: Tracks exactly how many "tokens" (AI words) each user consumes. This is how you will charge your customers money (e.g., $10/month for 5,000 actions).
 
-The Database (The Vault): Stores user accounts, subscription statuses, and anonymized task logs. Crucially: It never stores the raw webpage data.
+The Database (The Vault): Stores user accounts, subscription statuses, and anonymized task logs. It does not store the raw webpage data on any *external* service.
+
+Correction: an earlier version of this document stated flatly that the vault never stores raw webpage data. The local server does persist un-redacted frames to disk for the audit trail. The server is loopback-only and retention prunes it (7 days / 100 sessions by default), so it never leaves the machine — but the sentence as written was too strong. See "Local Storage of Raw Frames" in README.md.
 
 Pillar C: The Intelligence Layer (External Cloud AI)
 

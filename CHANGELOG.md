@@ -73,8 +73,11 @@ keep it that way.
 
 - Server bundles to a single ESM artifact; `npm start` no longer transpiles
   TypeScript at boot.
-- `.github/workflows/ci.yml` with six jobs. The extension typecheck is advisory
-  while 74 errors remain — a permanently red gate trains people to ignore red.
+- `.github/workflows/ci.yml` with six jobs. The extension typecheck was advisory
+  while 74 errors remained — a permanently red gate trains people to ignore
+  red. Those errors are now **zero**, so the typecheck is a hard gate. The
+  secret scan and the dependency audits remain advisory: the first because the
+  history still holds live keys, the second while moderate advisories remain.
 - `scripts/verify-repo-hygiene.mjs` and `scripts/verify-bundle.mjs`, both
   verified to fail on injected faults rather than merely to pass.
 - PowerShell launchers brought back in line with the code. Both had rotted
@@ -89,16 +92,32 @@ keep it that way.
 
 - `host_permissions: ['<all_urls>']` is required for a cross-site agent and is
   a standing risk; it needs Web Store review.
-- Five `high` advisories remain in the build toolchain (`wxt` and its
-  transitive tree) and two in the test runner (`vitest`, `vite`). Both are
-  dev-only and neither ships. Fixes require breaking upgrades
-  (`wxt` 0.19→0.21, `vitest`→5.0.2). Four criticals were removed via targeted
-  `overrides`; a second attempt regressed and was reverted.
-- The E2E suite is a stub. The agent loop has never run end to end.
+- All `high` and `critical` advisories are cleared. `vitest` moved 1.6.1 → 3.2.7
+  (1 high + 1 critical) and the extension's five highs were closed with npm
+  `overrides` for `adm-zip` and `tmp`; `wxt` stays on 0.19.x. `vitest` 5.x was
+  not used: it needs vite 6/7/8, the tree resolves vite 5 via `wxt`, and forcing
+  past that produces a tree that installs but does not run. Four `moderate`
+  advisories remain in dev tooling only and ship in nothing.
+- The E2E suite still cannot run on a host without a Chromium binary. It runs
+  in CI, where the browser is installed.
 - Neither PowerShell launcher has ever been executed — there is no PowerShell
   on the Linux build host and no Windows CI.
 - `fetch-models` covers the three MediaPipe assets. The ONNX OCR/UI models
   vendored under `extension/public/onnx/` are not pinned.
+- `noUncheckedIndexedAccess` is off in the extension. Turning it on would prove
+  index access safe but cascades into unrelated errors; it wants its own change.
+- `GET /api/system-telemetry` walks the session tree synchronously on every call
+  and the dashboard polls it once a second.
+
+### Documentation corrections
+
+- The zero-egress claim was overstated in three documents. The raw frame never
+  reaches an AI provider and never crosses the network, but it *is* sent to the
+  local server and written to disk in cleartext for the audit trail. Corrected
+  in `README.md` (with a new "Local Storage of Raw Frames" section),
+  `ZERO_TRUST_AI_WEB_AGENT_SPECIFICATION.md` and `system-architecture.md`.
+- `README.md` environment table and `s.ps1` now cover every variable the server
+  actually reads, including the ones that were documented but unwired.
 
 ### Security history — requires operator action
 

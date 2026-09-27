@@ -19,7 +19,15 @@
 > **“The Cloud does the thinking; the Edge does the acting.”**  
 > A zero-trust AI web agent that masks PII locally, detects faces via MediaPipe, runs on-device OCR
 > and UI vision via WebAssembly/WebGPU (ONNX), and orchestrates browser actions through a hybrid VLM —
-> while **raw sensitive data never leaves the browser tab**.
+> while **raw sensitive data never reaches an AI provider**.
+
+> **Scope of that guarantee, stated precisely.** Redaction happens in the tab, and only
+> the redacted frame is ever attached to a model request — enforced server-side and
+> pinned by tests. The un-redacted frame *is* sent to the local server and written to
+> disk for the session audit trail, because the server is the only component that can
+> record what the agent actually saw. The server binds to loopback only and refuses any
+> other address, so nothing crosses the network. If keeping that local copy is
+> unacceptable for your threat model, see "Local storage of raw frames" below.
 
 </div>
 
@@ -78,7 +86,7 @@ browser tab (DOM sanitization, OCR, face redaction, UI vision, click/type execut
 | 🚦 **Anti-loop engine** | Stutter-breaker, re-search trap, universal post-submission completion guard |
 | 🎛️ **Mission Control dashboard** | Full-tab telemetry (API calls, payload size, latency, loop status, model health, host metrics) |
 | 🧩 **Side panel HUD** | Live execution cockpit + **downloadable compliance audit certificate** |
-| 🗄️ **Session vault** | Local + server-side storage of *masked-only* artifacts (never raw imagery) |
+| 🗄️ **Session vault** | Local + server-side storage of session artifacts. Un-redacted frames are retained on disk for the audit trail — see "Local storage of raw frames". Masked frames are the only ones sent to a provider. |
 | ⚡ **Adaptive hardware tiering** | WebGPU / WASM-SIMD / WASM-lite per device capability |
 
 ---
@@ -120,7 +128,7 @@ browser tab (DOM sanitization, OCR, face redaction, UI vision, click/type execut
 
 1. **Local Perception** — All CV (face, OCR, UI detection) runs in the browser.
 2. **Redaction Protocol** — Sensitive DOM & screen regions are masked *before* any egress.
-3. **Zero-Egress Invariant** — Plaintext tokens & raw frames are provably never transmitted
+3. **Zero-Egress Invariant** — Plaintext tokens and raw frames are provably never transmitted to any AI provider. The raw frame does reach the local server and its disk; see "Local storage of raw frames".
    (verified by the `piiLeak` security suite over 150 scenarios × 8 secrets = 1,200 leak checks).
 
 ---
@@ -325,6 +333,20 @@ Click **⚡ Run Autonomous Agent** and watch the console, HUD milestones, and Mi
 | `ROUTER_API_KEY` | Either* | 9router API key | — |
 | `GEMINI_MODEL` | No | Gemini model override | `gemini-2.5-flash` |
 | `MODEL_NAME` | No | 9router primary model | `ag/gemini-3.7-flash-high` |
+| `RATE_LIMIT_MAX_REQUESTS` | No | Requests per window per client IP | `40` |
+| `RATE_LIMIT_WINDOW_MS` | No | Rate-limit window | `60000` |
+| `MAX_OUTPUT_TOKENS` | No | Per-call provider output ceiling. Bounds spend. | `4096` |
+| `MAX_BODY_BYTES` | No | Request body cap | `20971520` |
+| `MAX_STEPS` | No | Server-side step ceiling per run | `35` |
+| `SESSION_RETENTION_DAYS` | No | Age-based session pruning | `7` |
+| `MAX_SESSIONS` | No | Count-based session pruning | `100` |
+| `LOG_FORMAT` | No | `json` or `pretty` | `pretty` |
+| `WIRE_TRACE` | No | Diagnostic request logging. Lengths and states only, never bodies. | off |
+| `REJECT_UNREDACTED` | No | `true` refuses any image not verified-redacted | `false` |
+| `TELEMETRY_VERBOSE` | No | Re-exposes the host fingerprint on the telemetry endpoint | `false` |
+
+A malformed numeric value falls back to the default and logs a warning — it does not
+fail the boot. `server/.env.example` is the authoritative list.
 
 \* You must configure **at least one** AI provider (Gemini is preferred).
 
@@ -337,7 +359,7 @@ not by a password both sides happen to hold.
 |------|---------|
 | `SERVER_URL` | Fallback server URL, used only until the extension is paired |
 | Paired server URL | Stored in `chrome.storage.local` at pairing time |
-| Bearer token | 15-minute HS256 token, refreshed by re-pairing. Held in `chrome.storage.local`. |
+| Bearer token | 15-minute HS256 token. Refreshed automatically via `POST /api/auth/refresh`, which re-issues from a valid non-expired token. Held in `chrome.storage.local`. |
 
 While unpaired the extension makes **zero** fetch calls to the server — it
 refuses at the call site rather than sending an unauthenticated request and
@@ -520,8 +542,39 @@ ISO/IEC 7810/7812, ISO 27001/27701.
 |------|-------|-------|
 | Extension manifest/perms | `extension/wxt.config.ts` | Auto-loaded into `.output/chrome-mv3` |
 | Theme palette | `extension/tailwind.config.js` | Royal-navy & aureate-gold light/dark |
-| Server CORS/rate-limit | `server/src/index.ts` | `RATE_LIMIT_MAX_REQUESTS = 40` |
-| Session retention | `extension/src/utils/sessionLogger.ts` | Cap 15 client sessions, strips old images |
+| Server CORS/rate-limit | `server/.env` | `RATE_LIMIT_MAX_REQUESTS`, `RATE_LIMIT_WINDOW_MS` — read at boot, default 40/60s |
+| Session retention | `server/.env` | `SESSION_RETENTION_DAYS`, `MAX_SESSIONS` — pruned hourly, and at boot/shutdown |
+| Provider output ceiling | `server/.env` | `MAX_OUTPUT_TOKENS`, default 4096 — bounds spend per step |
+
+---
+
+## 🗄️ Local Storage of Raw Frames
+
+**What actually happens.** The content script masks PII in the tab. The masked frame is
+the only image attached to a model request. Separately, the *un-redacted* frame is sent
+to the local server and written to `storage/sessions/<sessionId>/raw-images/`, in
+cleartext, retained until retention prunes it.
+
+**Why.** The server is the only component that can record what the agent actually saw.
+Without the raw frame there is no audit trail, no way to prove redaction did not
+corrupt the page, and no way to investigate a disputed action.
+
+**What bounds it.**
+
+- The server binds to loopback only and refuses any other address, so nothing crosses
+  the network. See `HOST` in `.env.example`.
+- Retention prunes by age and by count. Defaults: 7 days, 100 sessions.
+- `SESSION_STORAGE_DIR` redirects the whole tree, so it can live on an encrypted volume.
+
+**If that is unacceptable for your threat model,** put the storage directory on an
+encrypted filesystem and accept the audit trade-off, or patch the server to stop
+persisting `rawImage`. That is a deliberate product decision, not a bug — which is why
+it is written here rather than buried.
+
+**What is *not* true of this design.** "Raw data never leaves the machine" is accurate.
+"Raw data never leaves the browser tab" was claimed here previously and was not: the
+frame does cross into the server process and onto disk. Earlier versions of this
+document, and the specification it references, overstated that boundary.
 
 ---
 

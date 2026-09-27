@@ -59,7 +59,15 @@ Modern web automation has transitioned from deterministic DOM scripting toward a
 The platform introduces the **Split-Brain Architecture**, establishing a physical, cryptographic, and operational separation between *Perception & Action* (localized within the user's browser sandbox) and *Cognitive Planning* (abstracted to remote vision-language models):
 - **Local Perception**: All computational vision steps required to identify identity documents, credit cards, bank accounts, biometric facial landmarks, and input controls execute directly inside the browser using client-side WebGPU and WebAssembly.
 - **Redaction Protocol**: Before any visual representation or DOM snapshot leaves the browser tab, sensitive regions are masked. In the screenshot, regions are double-shielded: an underlying hardware-accelerated Gaussian blur covered by an opaque, high-contrast semantic badge (`#0F172A` Slate fill, `#10B981` Emerald stroke, and monospace labels such as `[REDACTED: AADHAAR]`). In the DOM, text nodes and input values are replaced with frozen sentinels.
-- **Zero-Egress Invariant**: Plaintext sensitive tokens, raw unredacted screenshots, and host machine identifiers are mathematically guaranteed never to cross the network boundary.
+- **Zero-Egress Invariant**: Plaintext sensitive tokens and host machine identifiers are mathematically guaranteed never to cross the network boundary.
+
+  **Scope, corrected.** This invariant previously also claimed raw unredacted screenshots
+  never crossed any boundary. That was true of the *network* boundary and false of the
+  *process* boundary: the un-redacted frame is sent to the local server and written to
+  `storage/sessions/<id>/raw-images/` in cleartext for the audit trail. It never reaches
+  an AI provider, and the server binds to loopback only, so it never crosses the network.
+  See "Local Storage of Raw Frames" in README.md for the full statement and the knobs
+  that bound retention.
 
 ---
 
