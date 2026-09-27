@@ -111,6 +111,18 @@ keep it that way.
 
 ### Documentation corrections
 
+- Verified working against a live relay (`ROUTER_URL` + `ROUTER_API_KEY`,
+  `MODEL_NAME=claude-poolside`): boot, pairing, `/api/step` returning valid
+  action JSON, multi-turn history, and the action policy all behave. Two
+  first-run gotchas are now recorded in README/`.env.example`: `server/.env`
+  must exist before the server will start at all, and the relay's
+  `MODEL_NAME` may resolve to a different model than the one requested
+  (it served `poolside/laguna-s-2.1:free` for `claude-poolside`).
+- The provider call put the 35s abort `signal` in the request body, which
+  Gemini rejects as an unknown field. Every Gemini call failed on shape, not
+  credentials. Fixed in a1159ba6; no test could have caught it, because the
+  suite mocks the provider.
+
 - The zero-egress claim was overstated in three documents. The raw frame never
   reaches an AI provider and never crosses the network, but it *is* sent to the
   local server and written to disk in cleartext for the audit trail. Corrected
