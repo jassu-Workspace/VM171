@@ -35,6 +35,7 @@ export const ACTION_VERBS = [
   'scroll',
   'back',
   'done',
+  'wait',
 ] as const;
 
 export type ActionVerb = (typeof ACTION_VERBS)[number];

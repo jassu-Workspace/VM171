@@ -65,6 +65,25 @@ const redactionEnvelope = z
   .optional()
   .nullable();
 
+export const MAX_SCRATCHPAD_BYTES = 16384;
+
+const boundedScratchpad = z
+  .unknown()
+  .refine(
+    (val) => {
+      if (val === undefined || val === null) return true;
+      try {
+        const str = typeof val === 'string' ? val : JSON.stringify(val);
+        return str.length <= MAX_SCRATCHPAD_BYTES;
+      } catch {
+        return false;
+      }
+    },
+    `scratchpad exceeds ${MAX_SCRATCHPAD_BYTES} bytes`
+  )
+  .optional()
+  .nullable();
+
 export const StepSchema = z
   .object({
     // `.refine` rather than `.min(1)`: min(1) accepts a string of spaces, and
@@ -78,7 +97,7 @@ export const StepSchema = z
     maskedDom: z.string().max(2 * 1024 * 1024, 'maskedDom exceeds 2MB'),
     redactedImage: base64Image,
     redaction_legend: z.array(legendEntry).max(500, 'too many legend entries').optional().nullable(),
-    scratchpad: z.unknown().optional().nullable(),
+    scratchpad: boundedScratchpad,
     sessionId: z.string().max(64, 'sessionId exceeds 64 characters').optional().nullable(),
     step: z.number().int('step must be an integer').min(0).max(10_000).optional().nullable(),
     rawImage: base64Image,

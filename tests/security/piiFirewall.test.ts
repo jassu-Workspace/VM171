@@ -139,3 +139,47 @@ describe('Cycle 2.10 — the firewall runs BEFORE the PII leaves for the model',
     expect(result.body.error).toBe('UNSANITIZED_PAYLOAD_REJECTED');
   });
 });
+
+describe('Task C — firewall covers all outbound prompt fields', () => {
+  async function postPayload(overrides: Record<string, unknown>) {
+    const res = await app.request('http://localhost/api/step', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeader(), Origin: ALLOWED },
+      body: JSON.stringify({
+        task: 'check the page',
+        maskedDom: 'safe content',
+        redactedImage: '',
+        redaction_legend: [],
+        subTasks: [],
+        actionHistory: [],
+        ...overrides,
+      }),
+    });
+    return { status: res.status, body: (await res.json().catch(() => ({}))) as { error?: string } };
+  }
+
+  it('rejects unmasked PII in task', async () => {
+    const result = await postPayload({ task: 'Call customer at 9876543210' });
+    expectRejected(result, 'task containing phone number');
+  });
+
+  it('rejects unmasked PII in scratchpad', async () => {
+    const result = await postPayload({ scratchpad: { patient: 'Patient ID AB-1234-CD' } });
+    expectRejected(result, 'scratchpad containing medical record');
+  });
+
+  it('rejects unmasked PII in actionHistory', async () => {
+    const result = await postPayload({
+      actionHistory: [{ action: 'type', value: 'password: hunter2xyz' }],
+    });
+    expectRejected(result, 'actionHistory containing password');
+  });
+
+  it('rejects unmasked PII in subTasks', async () => {
+    const result = await postPayload({
+      subTasks: ['Pay him at user@okaxis'],
+    });
+    expectRejected(result, 'subTasks containing UPI ID');
+  });
+});
+

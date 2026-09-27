@@ -1512,6 +1512,9 @@ export async function executeAction(actionJson: {
       case 'done':
         return { success: true };
 
+      case 'wait':
+        return { success: true };
+
       default:
         return { success: false, error: `Unknown action: ${actionJson.action}` };
     }

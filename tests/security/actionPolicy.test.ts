@@ -47,6 +47,9 @@ import {
   ALLOWED_ACTIONS,
   type PolicyConfig,
 } from '../../server/src/actionPolicy';
+import { ACTION_NAMES } from '../../server/src/responseSchema';
+import { ACTION_VERBS } from '../../extension/src/types/messages';
+import { executeAction } from '../../extension/src/entrypoints/content/index';
 
 const DEFAULT_POLICY: PolicyConfig = { maxStep: 5, step: 1 };
 
@@ -85,6 +88,26 @@ describe('Cycle 3.1 — allowed actions', () => {
     // only ever approved 'click'.
     const verdict = evaluateAction(act({ action: 'CLICK' }), DEFAULT_POLICY);
     expect(verdict.allowed).toBe(false);
+  });
+
+  it('asserts every action the response schema permits is dispatchable end to end (policy-permitted AND implemented in content script)', async () => {
+    // Invariant: The model's response schema (what the model may return) must be
+    // dispatchable end to end:
+    // 1. Permitted by the server action policy (policy-permitted).
+    // 2. Recognized and handled by the content script's executeAction and message schema.
+    for (const action of ACTION_NAMES) {
+      // 1. Policy-permitted
+      expect(ALLOWED_ACTIONS, `Policy allowlist must permit action '${action}'`).toContain(action);
+      const over: Record<string, unknown> = { action };
+      if (action === 'navigate') over.value = 'https://www.isro.gov.in';
+      const verdict = evaluateAction(act(over), DEFAULT_POLICY);
+      expect(verdict.allowed, `Policy evaluation must allow action '${action}'`).toBe(true);
+
+      // 2. Implemented in content script
+      expect(ACTION_VERBS, `Content script ACTION_VERBS must include action '${action}'`).toContain(action);
+      const res = await executeAction({ action });
+      expect(res.error ?? '').not.toMatch(/Unknown action/i);
+    }
   });
 });
 

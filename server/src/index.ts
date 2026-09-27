@@ -238,6 +238,7 @@ const ALLOWED_ORIGINS = parseAllowedOrigins(process.env.ALLOWED_ORIGINS);
 // default as the `bodyLimit` registration further down — do not fork it.
 const MAX_BODY_BYTES = parseNumericEnv('MAX_BODY_BYTES', 20 * 1024 * 1024, { min: 1 });
 const MAX_STEPS = parseNumericEnv('MAX_STEPS', 35, { min: 1 });
+const MAX_OUTPUT_TOKENS = parseNumericEnv('MAX_OUTPUT_TOKENS', 4096, { min: 1 });
 
 // ── WIRE TRACE (diagnostic, opt-in) ─────────────────────────────────────────
 // TEMPORARY. Registered FIRST — above originGuard, bodyLimit, CORS and the
@@ -1163,16 +1164,6 @@ app.post('/api/step', async (c) => {
   const subTasks = clientSubTasks ?? [];
   const actionHistory = clientActionHistory ?? [];
 
-  // ZERO-TRUST SECURITY FIREWALL GATE: Rejects unmasked PII payloads before reaching upstream VLMs
-  const firewallViolation = checkFirewallViolations(maskedDom);
-  if (firewallViolation) {
-    log.error(`[Firewall Gate] Rejected unmasked PII in payload from ${clientIp} [${sessionId}]: ${firewallViolation}`);
-    return c.json({
-      error: 'UNSANITIZED_PAYLOAD_REJECTED',
-      detail: `Security firewall rejected unmasked PII in payload: ${firewallViolation}`,
-    }, 400);
-  }
-
   // Cycle 1.4: treat the client's redaction envelope as a CLAIM. The server
   // decides policy, and accounts for every step that was not verified.
   const redactionVerdict = evaluateRedactionPolicy(
@@ -1335,6 +1326,34 @@ app.post('/api/step', async (c) => {
           .join('\n')
       : '';
 
+  const subTasksText =
+    subTasks.length > 0
+      ? '\n\nSubTasks:\n' + subTasks.map((st) => `- ${st}`).join('\n')
+      : '';
+
+  const promptText =
+    'Task: ' +
+    task +
+    subTasksText +
+    historyText +
+    (scratchpad !== null && scratchpad !== undefined
+      ? '\n\nWorking Memory Scratchpad:\n' + (typeof scratchpad === 'string' ? scratchpad : JSON.stringify(scratchpad, null, 2))
+      : '') +
+    '\n\nMasked DOM:\n' +
+    maskedDom +
+    '\n\nredaction_legend:\n' +
+    JSON.stringify(legendArray);
+
+  // ZERO-TRUST SECURITY FIREWALL GATE: Rejects unmasked PII payloads across all assembled prompt fields before reaching upstream VLMs
+  const firewallViolation = checkFirewallViolations(promptText);
+  if (firewallViolation) {
+    log.error(`[Firewall Gate] Rejected unmasked PII in prompt payload from ${clientIp} [${sessionId}]: ${firewallViolation}`);
+    return c.json({
+      error: 'UNSANITIZED_PAYLOAD_REJECTED',
+      detail: `Security firewall rejected unmasked PII in payload: ${firewallViolation}`,
+    }, 400);
+  }
+
   // Build multimodal user message (ZERO-TRUST: rawImage is NEVER sent to the cloud)
   const userContent: Array<
     | { type: 'text'; text: string }
@@ -1342,17 +1361,7 @@ app.post('/api/step', async (c) => {
   > = [
     {
       type: 'text',
-      text:
-        'Task: ' +
-        task +
-        historyText +
-        (incomingScratchpad
-          ? '\n\nWorking Memory Scratchpad:\n' + JSON.stringify(incomingScratchpad, null, 2)
-          : '') +
-        '\n\nMasked DOM:\n' +
-        maskedDom +
-        '\n\nredaction_legend:\n' +
-        JSON.stringify(legendArray),
+      text: promptText,
     },
   ];
 
@@ -1418,6 +1427,7 @@ app.post('/api/step', async (c) => {
               { role: 'system', content: systemPrompt },
               { role: 'user', content: userContent },
             ],
+            max_tokens: MAX_OUTPUT_TOKENS,
             // @ts-expect-error signal is supported
             signal: controller.signal,
           });
@@ -1469,6 +1479,7 @@ app.post('/api/step', async (c) => {
               { role: 'system', content: systemPrompt },
               { role: 'user', content: userContent },
             ],
+            max_tokens: MAX_OUTPUT_TOKENS,
             // @ts-expect-error signal is supported
             signal: controller.signal,
           });

@@ -38,23 +38,32 @@
  * Pure and dependency-free.
  */
 
-/** Exactly the action types `executeAction` implements (content/index.ts). */
+/**
+ * Exactly the action types the model response schema permits and executeAction implements.
+ *
+ * Task A reconciliation:
+ * - Added 'wait': The model response schema (ACTION_NAMES) and system prompts have always
+ *   permitted 'wait', but it was missing from the policy allowlist, causing every wait action
+ *   to be rejected with a policy violation.
+ * - Dropped 'fill', 'input', 'choose': These were legacy client-side normalization aliases
+ *   for 'type' and 'select'. Because the model prompts never emit them and responseSchema.ts
+ *   strictly rejects unprompted action verbs, they are dropped from the policy allowlist
+ *   to ensure the policy enforces the exact model action contract without dead or redundant entries.
+ */
 export const ALLOWED_ACTIONS: readonly string[] = [
   'click',
-  'type',
-  'fill',
-  'input',
   'select',
-  'choose',
   'zoom',
+  'type',
   'navigate',
   'scroll',
-  'back',
+  'wait',
   'done',
+  'back',
 ];
 
-/** Actions that terminate a run and therefore are not gated by verb text. */
-const TERMINAL_ACTIONS = new Set(['done', 'back', 'scroll', 'zoom']);
+/** Actions that terminate a run or perform no DOM mutation and therefore are not gated by verb text. */
+const TERMINAL_ACTIONS = new Set(['done', 'back', 'scroll', 'zoom', 'wait']);
 
 /**
  * Verbs that mark an irreversible action.
