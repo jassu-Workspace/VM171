@@ -26,7 +26,7 @@ import {
   SAFE_TOKENS,
   stripOwnMasks,
 } from '../../utils/leakVerifier';
-import { buildElementMeta, sanitizeAttribute, DEFAULT_VALUE_CAP } from '../../utils/outboundText';
+import { buildElementMeta, sanitizeAttribute, escapeForScriptLiteral, isSafeNavigationUrl, DEFAULT_VALUE_CAP } from '../../utils/outboundText';
 import { prepareOutboundText } from '../../utils/untrustedContent';
 import {
   evaluateTextPII,
@@ -785,13 +785,14 @@ export async function handleNativeSelect(
   }
 
   // 4. Main-World script bridge for legacy inline onChange handlers (e.g. Bhuvan getStates(this.value),themechange())
+  //    id/name are page-controlled, so they are escaped for a JS string literal before interpolation.
   const selectId = selectEl.id;
   const selectName = selectEl.name;
   if (selectId || selectName) {
     const doc = selectEl.ownerDocument || document;
     const targetScript = selectId
-      ? `const el = document.getElementById("${selectId}");`
-      : `const el = document.querySelector('select[name="${selectName}"]');`;
+      ? `const el = document.getElementById("${escapeForScriptLiteral(selectId)}");`
+      : `const el = document.querySelector('select[name="${escapeForScriptLiteral(selectName)}"]');`;
     executeInMainWorld(
       doc,
       `
@@ -1468,6 +1469,15 @@ export async function executeAction(actionJson: {
             if (targetUrl.includes('.') && !targetUrl.includes(' ')) {
               targetUrl = 'https://' + targetUrl;
             }
+          }
+          // Defence in depth: the server-side action policy already refuses non-http(s)
+          // targets, but this final hop assigns straight to window.location.href, where
+          // `javascript:` is script execution rather than a page load.
+          if (!isSafeNavigationUrl(targetUrl)) {
+            // The rejected value is deliberately not echoed: it is model-supplied, and
+            // echoing it would reflect any injected instructions into the session log.
+            console.warn('[content] Guard: refused navigate to a non-http(s) target');
+            return { success: false, error: 'Refused navigation to a non-http(s) target' };
           }
           // Guard against unwanted navigation to google.com away from completed workflow pages
           const current = window.location.href.toLowerCase();

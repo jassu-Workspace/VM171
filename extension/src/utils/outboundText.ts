@@ -79,6 +79,69 @@ export function sanitizeAttribute(value: string, max: number = DEFAULT_VALUE_CAP
   return capForPrompt(escapeForPrompt(value), max);
 }
 
+/**
+ * Escape a page-controlled string for interpolation into a JavaScript string
+ * LITERAL, e.g. the `"${...}"` inside the script body that `executeInMainWorld`
+ * injects with `script.textContent`.
+ *
+ * NOT HTML escaping, which is what `escapeForPrompt` above does, and the two are
+ * not interchangeable. HTML escaping replaces `"` with the *text* `&quot;`; that
+ * happens to remove the breakout here, but it corrupts the value — an id of
+ * `a&b` would be looked up as `a&amp;b` and never found — and neither HTML
+ * escaper touches `\`, so an id of `x\` still escapes the closing quote and
+ * kills the whole injected body with a SyntaxError. A JS literal needs the
+ * escape character itself escaped, FIRST, or the escapes introduced afterwards
+ * are themselves escapable.
+ *
+ * Only `\` and `"` and the line terminators are escaped, because that is exactly
+ * what the grammar forbids unescaped inside a double-quoted literal. `<` and `/`
+ * are deliberately left alone: the script is built with `textContent`, so the
+ * HTML parser never sees it and `</script>` cannot terminate it.
+ */
+export function escapeForScriptLiteral(value: string): string {
+  if (typeof value !== 'string') return '';
+  return value
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029');
+}
+
+// eslint-disable-next-line no-control-regex
+const URL_CONTROL_CHARS = /[\u0000-\u001F\u007F]/g;
+
+/** RFC 3986 scheme: ALPHA *( ALPHA / DIGIT / "+" / "-" / "." ) then ":". */
+const URL_SCHEME = /^([a-zA-Z][a-zA-Z0-9+.-]*):/;
+
+/**
+ * Last-hop protocol check for the `navigate` action, which assigns the value to
+ * `window.location.href`. `javascript:` there is script execution, not a page
+ * load, and the value reaches this hop from the model.
+ *
+ * The server-side action policy is the real gate; this is the independent check
+ * that the final hop is not relying on it alone.
+ *
+ * Relative targets are allowed because the caller's own normalisation already
+ * produces them and they are the normal way to move within a site. A target with
+ * no scheme at all is relative by definition. Everything with a scheme must be
+ * http or https.
+ */
+export function isSafeNavigationUrl(url: string): boolean {
+  if (typeof url !== 'string') return false;
+  // Browsers discard these from a URL, so the check has to as well — otherwise
+  // `java&#9;script:alert(1)` passes the scheme test and still executes.
+  const cleaned = url.replace(URL_CONTROL_CHARS, '').trim();
+  if (cleaned.length === 0) return false;
+
+  const scheme = URL_SCHEME.exec(cleaned);
+  if (!scheme) return true;
+
+  const protocol = scheme[1].toLowerCase();
+  return protocol === 'http' || protocol === 'https';
+}
+
 export interface ElementMetaInput {
   type?: string | null;
   id?: string | null;
