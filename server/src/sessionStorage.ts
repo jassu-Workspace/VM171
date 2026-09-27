@@ -50,8 +50,19 @@ export interface SessionMeta {
 
 /**
  * Initializes a session directory structure under storage/sessions/<sessionId>/
+ *
+ * Returns the session path, or null when the directory could not be created.
+ * A null/boolean RETURN (rather than throwing) is the module-wide contract
+ * for write failures: the three saveSessionStep call sites in index.ts sit in
+ * the middle of the step pipeline with no try/catch today, so throwing there
+ * would either crash into the global 500 handler — turning a disk problem
+ * into a failed step and aborting a run that could otherwise conclude — or
+ * require a try/catch at every site. A flag the caller logs preserves every
+ * route's status code while making the failure visible in the redacting
+ * server log and detectable by programmatic callers. No route changes status
+ * except init/finalize, which already model failure with their 400 shapes.
  */
-export function initSession(sessionId: string, initialTask: string = ''): string {
+export function initSession(sessionId: string, initialTask: string = ''): string | null {
   const safe = safeSessionId(sessionId);
   const sessionPath = join(SESSIONS_DIR, safe);
 
@@ -100,8 +111,12 @@ export function initSession(sessionId: string, initialTask: string = ''): string
     if (initialTask) {
       writeFileSync(join(sessionPath, 'prompts', 'user_goal.txt'), initialTask, 'utf8');
     }
-  } catch (err) {
-    console.warn('[sessionStorage] initSession failed:', err);
+  } catch {
+    // Propagate as null: the caller logs via the redacting server log (a
+    // console.warn here would bypass it) and the /api/session/init route maps
+    // null to its existing 400 shape. Returning a path for a directory that
+    // was never created would be a lie the audit trail cannot afford.
+    return null;
   }
 
   return sessionPath;
@@ -110,11 +125,22 @@ export function initSession(sessionId: string, initialTask: string = ''): string
 /**
  * Saves all artifacts for a specific agent execution step:
  * raw images, masked images, vlm images, prompts, and VLM responses.
+ *
+ * Returns true when every write landed, false when any write failed — see the
+ * contract note on initSession for why a flag, not a throw. A partial write
+ * still returns false even when later writes succeed, so the caller can never
+ * mistake a degraded audit trail for a complete one.
  */
-export function saveSessionStep(data: StepStorageData): void {
+export function saveSessionStep(data: StepStorageData): boolean {
+  // Set by the per-image catch below: an image that failed to decode or land
+  // must not be silently absorbed into an overall success.
+  let failed = false;
   try {
     const safe = safeSessionId(data.sessionId);
     const sessionPath = initSession(safe, data.task);
+    // initSession signals failure with null (never a throw); without a
+    // directory every write below would throw, so fail fast and say so.
+    if (sessionPath === null) return false;
 
     // Helper function to decode and save base64 image across directory targets
     const saveImageToDirs = (dirs: string[], filename: string, base64Str: string): number => {
@@ -129,8 +155,11 @@ export function saveSessionStep(data: StepStorageData): void {
           }
           return buffer.length;
         }
-      } catch (imgErr) {
-        console.warn(`[sessionStorage] Failed to save image ${filename}:`, imgErr);
+      } catch {
+        // Propagate to the return flag: the caller logs via the redacting
+        // server log. Swallowing here reported a complete audit trail while
+        // frames were missing from disk.
+        failed = true;
       }
       return 0;
     };
@@ -246,15 +275,24 @@ export function saveSessionStep(data: StepStorageData): void {
     };
 
     writeFileSync(metaFile, JSON.stringify(meta, null, 2), 'utf8');
-  } catch (err) {
-    console.warn('[sessionStorage] saveSessionStep failed:', err);
+
+    return !failed;
+  } catch {
+    // Propagate as false: the step-pipeline callers log via the redacting
+    // server log and keep their 200s (an audit-write failure must not abort
+    // the run), while tests and tools can detect the failure directly.
+    return false;
   }
 }
 
 /**
- * Finalizes the session with completed or aborted status
+ * Finalizes the session with completed or aborted status.
+ *
+ * Returns true when the metadata write landed (or there was nothing to
+ * write), false when it failed — same flag-not-throw contract as initSession:
+ * the /api/session/finalize route maps false to its existing 400 shape.
  */
-export function finalizeSession(sessionId: string, status: 'completed' | 'aborted' | 'error', summary?: string): void {
+export function finalizeSession(sessionId: string, status: 'completed' | 'aborted' | 'error', summary?: string): boolean {
   try {
     const safe = safeSessionId(sessionId);
     const sessionPath = join(SESSIONS_DIR, safe);
@@ -270,8 +308,10 @@ export function finalizeSession(sessionId: string, status: 'completed' | 'aborte
       if (summary) meta.summary = summary;
       writeFileSync(metaFile, JSON.stringify(meta, null, 2), 'utf8');
     }
-  } catch (err) {
-    console.warn('[sessionStorage] finalizeSession failed:', err);
+    return true;
+  } catch {
+    // Propagate as false; the caller logs via the redacting server log.
+    return false;
   }
 }
 

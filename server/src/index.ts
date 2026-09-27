@@ -441,6 +441,46 @@ app.use('*', async (c, next) => {
   await next();
 });
 
+// POST /api/auth/refresh — exchange a valid, non-expired token for a fresh one.
+//
+// A full run issues up to MAX_STEPS model calls at up to 35 s each plus
+// settling delays, so a long run outlasts the 15-minute DEFAULT_TTL_MS and
+// every subsequent call then 401s with no recovery: minting via
+// /api/auth/pair needs the one-time pairing code printed once on the
+// operator's console. This route re-issues from the token itself, so the
+// background can refresh mid-run without the operator.
+//
+// Registered AFTER the auth middleware on purpose, so /api/auth/pair stays
+// the only unauthenticated route: the middleware already rejects expired,
+// forged and wrong-audience tokens with 401, and the handler verifies AGAIN
+// rather than trusting that it ran. verifyToken is reused UNCHANGED — an
+// expired token is REFUSED, never honoured. A refresh that accepted expired
+// tokens would be a signature bypass, not a refresh.
+//
+// PONYTAIL: one route, no new env var, no refresh-token family, no rotation
+// scheme, no session store.
+app.post('/api/auth/refresh', async (c) => {
+  const authorization = c.req.header('authorization') ?? '';
+  const match = /^Bearer\s+(\S+)$/.exec(authorization);
+  if (!match) {
+    return c.text('Unauthorized', 401);
+  }
+
+  let subject: string;
+  let audience: string;
+  try {
+    const claims = verifyToken(match[1], { key: TOKEN_SIGNING_KEY, audience: DEFAULT_AUDIENCE });
+    subject = claims.sub;
+    audience = claims.aud;
+  } catch {
+    // Same oracle policy as the middleware: the reason is never returned.
+    return c.text('Unauthorized', 401);
+  }
+
+  const token = issueToken({ key: TOKEN_SIGNING_KEY, subject, audience, ttlMs: DEFAULT_TTL_MS });
+  return c.json({ token, expiresIn: DEFAULT_TTL_MS });
+});
+
 // ---------------------------------------------------------------------------
 //  HEALTH & TELEMETRY ENDPOINTS
 // ---------------------------------------------------------------------------
@@ -568,7 +608,13 @@ app.post('/api/session/init', async (c) => {
   try {
     const sessionId = validated.data.sessionId || `session_${Date.now()}`;
     const task = validated.data.task || '';
-    initSession(sessionId, task);
+    // initSession reports failure with null (never a throw); mapped to the
+    // route's existing 400 shape — a session that was never created must not
+    // report success.
+    if (initSession(sessionId, task) === null) {
+      log.warn(`Session init storage failed for ${sessionId} — 400 returned`);
+      return c.json({ error: 'Failed to initialize session directory' }, 400);
+    }
     return c.json({ success: true, sessionId });
   } catch {
     return c.json({ error: 'Failed to initialize session directory' }, 400);
@@ -607,7 +653,12 @@ app.post('/api/session/finalize', async (c) => {
 
   try {
     if (validated.data.sessionId) {
-      finalizeSession(validated.data.sessionId, 'completed', validated.data.summary);
+      // finalizeSession reports failure with false (never a throw); mapped to
+      // the route's existing 400 shape — no new status, no silent success.
+      if (!finalizeSession(validated.data.sessionId, 'completed', validated.data.summary)) {
+        log.warn(`Session finalize storage failed for ${validated.data.sessionId} — 400 returned`);
+        return c.json({ error: 'Failed to finalize session' }, 400);
+      }
     }
     return c.json({ success: true });
   } catch {
@@ -652,7 +703,10 @@ app.post('/api/session/screenshot', async (c) => {
     }
     const step = typeof clientStep === 'number' ? clientStep : 1;
     const imagePayload = typeof image === 'string' ? image : undefined;
-    saveSessionStep({
+    // Audit write: a false return is logged but keeps the 200 — the archive
+    // failing must be visible, not silent, yet must not change the route's
+    // status contract.
+    if (!saveSessionStep({
       sessionId,
       step,
       task: 'Direct screenshot capture',
@@ -660,7 +714,9 @@ app.post('/api/session/screenshot', async (c) => {
       maskedImage: undefined,
       vlmImage: imagePayload,
       vlmModel: 'direct-capture',
-    });
+    })) {
+      log.warn(`Screenshot archive storage failed for session ${sessionId} step ${step}`);
+    }
     return c.json({ success: true, sessionId, step });
   } catch (err) {
     return c.json({ error: 'Failed to archive screenshot', details: String(err) }, 500);
@@ -1284,7 +1340,9 @@ app.post('/api/step', async (c) => {
         },
       };
 
-      saveSessionStep({
+      // Audit write: logged on failure, response unchanged — a disk problem
+      // must neither abort the run nor pass silently.
+      if (!saveSessionStep({
         sessionId,
         step,
         task,
@@ -1296,7 +1354,9 @@ app.post('/api/step', async (c) => {
         promptContext: 'Workflow completion gate short-circuited upstream VLM call.',
         vlmResponse: JSON.stringify(doneResponse),
         actionJson: doneResponse,
-      });
+      })) {
+        log.warn(`Session audit storage failed for ${sessionId} step ${step} (workflow gate)`);
+      }
 
       logRequest({
         sessionId,
@@ -1653,8 +1713,9 @@ app.post('/api/step', async (c) => {
   //  STRUCTURED LOCAL SESSION STORAGE
   //  Saves raw picture, masked picture, prompts in TXT, and responses in TXT/JSON
   //  under storage/sessions/<sessionId>/
+  //  Audit write: logged on failure, response unchanged (see initSession note).
   // -------------------------------------------------------------------------
-  saveSessionStep({
+  if (!saveSessionStep({
     sessionId,
     step,
     task,
@@ -1666,7 +1727,9 @@ app.post('/api/step', async (c) => {
     promptContext: userContent[0]?.type === 'text' ? userContent[0].text : undefined,
     vlmResponse: rawVlmResponse,
     actionJson: parsed,
-  });
+  })) {
+    log.warn(`Session audit storage failed for ${sessionId} step ${step}`);
+  }
 
   // Log summary line to /storage/server_logs.jsonl
   logRequest({
@@ -1781,6 +1844,61 @@ function resolveBindHost(): string {
 
 const bindHost = resolveBindHost();
 
+// Periodic retention prune.
+//
+// pruneSessions() ran at boot and in shutdown() only, so a long-running
+// server NEVER pruned and a hard kill skipped the shutdown one — un-redacted
+// frames accumulated without bound. This loop re-prunes on an hourly tick.
+//
+// Self-rescheduling setTimeout, NOT setInterval, for two reasons: (1) it is
+// the smaller change — node-shims.d.ts deliberately declares only setTimeout
+// and clearTimeout, so setInterval would need a shim edit plus this call site,
+// while this touches index.ts only; (2) the next tick is scheduled AFTER the
+// prune finishes, so a slow prune can never overlap the next one.
+//
+// The timer is unref'd so it never holds the process open; a prune failure is
+// caught and logged via log.warn so it can neither crash nor hang the server.
+// Started under the existing VITEST / NODE_ENV=test guard, so tests never
+// start the loop — and the test harness already points SESSION_STORAGE_DIR at
+// a throwaway tmpdir, so even a directly-driven loop cannot touch the
+// operator's real storage. PONYTAIL: no cron, no new subsystem, no library.
+const RETENTION_PRUNE_INTERVAL_MS = 60 * 60 * 1000; // 1 hour: retention granularity is days.
+
+function runRetentionPrune(reason: string): void {
+  try {
+    const pruned = pruneSessions();
+    if (pruned.removed > 0) {
+      log.info(`Session retention: pruned ${pruned.removed} expired session(s) (${pruned.remaining} remaining) [${reason}].`);
+    }
+  } catch (err) {
+    log.warn(`Session retention prune failed [${reason}]: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+let periodicPruneTimer: NodeJS.Timeout | null = null;
+
+export function startPeriodicPrune(intervalMs: number = RETENTION_PRUNE_INTERVAL_MS): NodeJS.Timeout {
+  // Restartable so a test can drive a short interval without disturbing state.
+  stopPeriodicPrune();
+  const tick = (): void => {
+    runRetentionPrune('periodic');
+    periodicPruneTimer = setTimeout(tick, intervalMs);
+    periodicPruneTimer.unref();
+  };
+  periodicPruneTimer = setTimeout(tick, intervalMs);
+  periodicPruneTimer.unref();
+  return periodicPruneTimer;
+}
+
+export function stopPeriodicPrune(): void {
+  if (periodicPruneTimer !== null) {
+    clearTimeout(periodicPruneTimer);
+    periodicPruneTimer = null;
+  }
+}
+
+export { RETENTION_PRUNE_INTERVAL_MS };
+
 let server: any = null;
 if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
   try {
@@ -1791,6 +1909,8 @@ if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
   } catch (err) {
     log.warn(`Session retention prune failed on startup: ${err instanceof Error ? err.message : String(err)}`);
   }
+
+  startPeriodicPrune();
 
   server = serve({
     fetch: app.fetch,
