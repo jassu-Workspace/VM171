@@ -31,7 +31,7 @@
  * so we can assert the loop executed exactly the actions it was told to and
  * then terminated, rather than hoping it did something reasonable.
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import { chromium, type BrowserContext, type Worker } from 'playwright';
 import { createServer, type Server } from 'node:http';
 import * as http from 'node:http';
@@ -83,6 +83,11 @@ const SERVER_LOG_FILE = join(tmpdir(), 'vm171-e2e-server.log');
 const aiCalls: Array<{ model: string; user: string }> = [];
 /** Actions the mock will hand back, in order. The last one ends the loop. */
 let script: string[] = [];
+/**
+ * When set, the next /chat/completions response waits on this before it is
+ * written. Lets a test hold an agent run open so an overlap is deterministic.
+ */
+let holdUntil: { promise: Promise<void>; release: () => void } | null = null;
 
 function readBody(req: import('node:http').IncomingMessage): Promise<string> {
   return new Promise((resolve) => {
@@ -121,6 +126,18 @@ beforeAll(async () => {
 
     // Scripted, so assertions are about the wiring rather than model output.
     const action = script.length > 1 ? script.shift()! : script[0];
+
+    // Optional hold, used by the concurrency test. Without it the mock answers
+    // in microseconds, the first agent run finishes before the second
+    // START_AGENT is even dispatched, and the guard under test never gets a
+    // chance to fire. Holding the first completion open makes the overlap
+    // deterministic instead of a race against a fast loop.
+    if (holdUntil) {
+      const gate = holdUntil;
+      holdUntil = null;
+      await gate.promise;
+    }
+
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(
       JSON.stringify({
@@ -283,6 +300,35 @@ afterAll(async () => {
   aiServer?.close();
   proxy?.close();
   for (const d of [profileDir, sessionDir]) if (d) rmSync(d, { recursive: true, force: true });
+});
+
+/**
+ * No test may leave an agent run behind. The background worker holds a single
+ * global runController, and START_AGENT refuses to begin while one is active —
+ * so a run leaked by one test makes the NEXT test's first START_AGENT return
+ * "already in progress". That failure is attributed to the wrong test and
+ * reads like a product bug. Release the hold first, otherwise the parked
+ * completion never resolves and STOP_AGENT races it.
+ */
+afterEach(async () => {
+  // Release any hold first, or the parked completion never resolves and the
+  // run cannot unwind.
+  holdUntil = null;
+  // STOP_AGENT only REQUESTS a stop (it calls requestStop and returns), so it
+  // is not synchronous — the worker needs a turn of the event loop to unwind
+  // and clear runController.
+  //
+  // An earlier version of this polled by sending a probe START_AGENT until it
+  // was accepted. That was self-defeating: on a CLEAR guard the probe STARTS a
+  // real run, which then has to be stopped by another non-synchronous
+  // STOP_AGENT, so the poll manufactured the very race it was checking for and
+  // handed a stale run to the next test. Never probe with the message whose
+  // guard is under test.
+  await worker
+    .evaluate(() => chrome.runtime.sendMessage({ type: 'STOP_AGENT' }))
+    .catch(() => {});
+  // Let the worker's teardown run to completion.
+  await new Promise((r) => setTimeout(r, 500));
 });
 
 /** Pair the extension with the server, exactly as the Options page would. */
@@ -492,6 +538,19 @@ describe('E2E — the real agent loop, content script to AI and back', () => {
       return hit?.id ?? -1;
     }, '/fixture');
     expect(tabId).toBeGreaterThanOrEqual(0);
+
+    // Hold the first completion open so the first run is still in flight when
+    // the second START_AGENT arrives. Otherwise the mock answers instantly, the
+    // first run completes, and the guard being tested never gets exercised —
+    // the test then fails for a reason that has nothing to do with the guard.
+    let releaseHold = () => {};
+    holdUntil = {
+      promise: new Promise<void>((r) => { releaseHold = r; }),
+      release: () => {},
+    };
+    script = [JSON.stringify({ action: 'click', selector: '#target', thought: 'Working.' })];
+    // The first run is now parked inside the mock awaiting releaseHold.
+
     const first = await control.evaluate(
       async ([task, tab]) =>
         chrome.runtime.sendMessage({ type: 'START_AGENT', payload: task, targetTabId: tab }),
@@ -505,6 +564,10 @@ describe('E2E — the real agent loop, content script to AI and back', () => {
     );
     expect(second).toMatchObject({ success: false });
     expect(String((second as any).error ?? '')).toMatch(/already in progress/i);
+
+    // Let the held run finish so it cannot leak into later assertions.
+    releaseHold();
+    holdUntil = null;
 
     // Clean up so the run does not leak into later assertions.
     await control.evaluate(() => chrome.runtime.sendMessage({ type: 'STOP_AGENT' })).catch(() => {});

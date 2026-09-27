@@ -786,8 +786,58 @@ const FIREWALL_PATTERNS: Record<string, RegExp> = {
   // line. The 13 added below close that gap; the set is now deliberately the
   // same taxonomy the client uses, so the two layers cannot drift apart again
   // the way the test mirror did (finding N8).
-  SWIFT_BIC: /\b[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?\b|\b[A-Z]{2}\d{2}[A-Z0-9]{12,30}\b/,
-  CRYPTO_WALLET: /\b(?:0x[a-fA-F0-9]{40}|(?:1|3|bc1)[a-zA-HJ-NP-Z0-9]{25,39})\b/,
+  // SWIFT/BIC detection is CONTEXT-GATED, and that is a deliberate
+  // correctness trade rather than a tightening.
+  //
+  // The original alternative was `[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?`, i.e.
+  // "any run of 8-11 uppercase-or-digit characters". BIC8 is 4 letters + 2
+  // letters + 2 alphanumeric, so that shape is *necessary but nowhere near
+  // sufficient* — it is satisfied by an enormous number of ordinary English
+  // words. Measured against this project's own prompt scaffolding, it matched
+  // EVIDENCE, INTERACTIVE, REDACTED, PASSWORD, PASSPORT, SENTINEL, UNIVERSAL,
+  // WORKFLOW, UNPAIRED, SOVEREIGN, SHOPPING, LOCATION, CONTRACT, UNBOUNDED and
+  // REPLACES.
+  //
+  // That was not a theoretical problem. The E2E agent loop failed twice in a
+  // row on the extension's own fixed banner text — first `EVIDENCE`, then
+  // `INTERACTIVE` — each time with a real 400 from the firewall gate and zero
+  // AI calls. Adding word-boundary lookarounds was not enough either: base64
+  // image frames contain `/` and `+` roughly every 64 characters, and each one
+  // re-splits the run into fresh pseudo-tokens, so 14 of 500 realistic 12.6KB
+  // frames still matched (`TTRJHW7G`, for example).
+  //
+  // A bare 8-11 character uppercase token carries too little information to
+  // call a bank identifier, so the keyword gate is the honest design: a
+  // SWIFT/BIC in the wild is printed next to the word SWIFT, BIC or IBAN, and
+  // the gap between the keyword and the code is bounded. Requiring the
+  // keyword ALSO fixes the base64 problem for free, because base64 has no
+  // whitespace and so cannot present `\bswift\b ... NEDSZAJJ` — the keyword
+  // must be a standalone token. Measured: 0 of 1000 frames.
+  //
+  // The ungated ISO 9362 branch stays active below. `[A-Z]{2}\d{2}[A-Z0-9]{12,30}`
+  // is a genuine signature (two letters, two check digits, then a
+  // checksum-bearing body) and is what catches an IBAN printed without the
+  // word "IBAN" beside it.
+  //
+  // KNOWN GAP, accepted: a BIC printed with no keyword anywhere near it, and
+  // with no IBAN-shaped account number, will not be caught. Catching that
+  // requires the 8-character shape, which cannot be told apart from ordinary
+  // caps text. Tightening the firewall further would break the agent on
+  // ordinary pages, which is the worse failure for a privacy gate whose job
+  // is to protect a specific set of strong-signature identifiers (card, IBAN,
+  // Aadhaar, wallet) that are all still detected.
+  SWIFT_BIC: /\b(?:swift|bic|bic8|bic11|iban)\b[\w\s/.:=-]{0,18}?\b[A-Z0-9]{8,34}\b|(?<![A-Za-z0-9+/=])[A-Z]{2}\d{2}[A-Z0-9]{12,30}(?![A-Za-z0-9+/=])/i,
+  // The base58 alternative was `(?:1|3|bc1)[a-zA-HJ-NP-Z0-9]{25,39}` with a
+  // trailing `\b`, which matches the PREFIX of any base64 blob starting with
+  // 1, 3 or "bc1" — and base64 image frames start with those constantly.
+  // Measured: 197 of 300 realistic 12.6KB frames were rejected as containing
+  // a crypto wallet. Invisible until the firewall started scanning the
+  // assembled prompt, because maskedDom never contained base64.
+  //
+  // Fixed with a negative lookaround on both sides, so a match must be a
+  // complete token rather than a slice of a longer run, plus real address
+  // lengths: P2PKH is 26-35 base58chars, bech32 is 42-62 after the prefix.
+  CRYPTO_WALLET: /(?<![A-Za-z0-9+/=])(?:0x[a-fA-F0-9]{40}|[13][a-km-zA-HJ-NP-Z1-9]{25,34}|bc1[a-z0-9]{25,59})(?![A-Za-z0-9+/=])/,
   PASSPORT: /\b[A-Z][1-9]\d{6}\b|\b[A-Z]\d{7}\b/,
   DRIVING_LICENSE: /\b[A-Z]{2}[0-9]{2}[ -]?[0-9]{11}\b/,
   PERSON: /\b(?:Mr\.|Mrs\.|Ms\.|Dr\.)\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\b/,

@@ -154,7 +154,14 @@ describe('Cycle 3.4 — the summary is safe to put in a prompt', () => {
   it('summarises a detection without a directive', () => {
     const evidence = detectCompletionEvidence('Form submitted successfully', en);
     const summary = summariseEvidence(evidence);
-    expect(summary).toContain('EVIDENCE');
+    // Header is lower-case "page evidence", deliberately. The server firewall
+    // scans the assembled prompt, and an 8-character run of uppercase letters
+    // is indistinguishable from a SWIFT/BIC bank identifier — the previous
+    // `--- PAGE EVIDENCE ---` header tripped its own privacy gate and blocked
+    // every agent step on any page with no completion evidence. Assert the
+    // shape, not the old casing, so this cannot silently regress.
+    expect(summary).toContain('page evidence');
+    expect(summary).not.toMatch(/--- [A-Z]{6,}/);
     expect(summary.toLowerCase()).not.toContain('conclude');
   });
 
