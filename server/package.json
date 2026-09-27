@@ -27,5 +27,8 @@
     "@types/node": "^26.5.0",
     "esbuild": "^0.28.2",
     "typescript": "^5.9.3"
+  },
+  "optionalDependencies": {
+    "onnxruntime-node": "^1.29.0"
   }
 }

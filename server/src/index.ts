@@ -44,6 +44,8 @@ import {
   type RedactionEnvelopeInput,
   type DegradationTally,
 } from './redactionPolicy';
+import { detectSensitiveRegions, applyRedaction, describeRedactionCapability } from './redaction';
+import { inflateSync, deflateSync } from 'node:zlib';
 
 // Minimal Node process typing
 declare const process: {
@@ -203,6 +205,282 @@ function clientAddress(c: unknown): string {
 // claim, never ground truth — see redactionPolicy.ts.
 const REJECT_UNREDACTED = String(process.env.REJECT_UNREDACTED ?? '').toLowerCase() === 'true';
 const redactionTally: DegradationTally = createDegradationTally();
+
+/**
+ * Server-side redaction, on by default.
+ *
+ * The extension cannot mask anything — its models are dynamically quantized
+ * and need an operator no onnxruntime-web build provides, and the WASM backend
+ * cannot initialise in an MV3 service worker. Frames are posted to this
+ * loopback server either way, so masking happens here. This changes WHERE the
+ * mask is applied, not what leaves the browser.
+ *
+ * Set SERVER_REDACTION=false to fall back to trusting the client's envelope,
+ * which — given the above — means sending unmasked frames. That is recorded in
+ * the boot banner so it is never a silent downgrade.
+ */
+const SERVER_REDACTION = String(process.env.SERVER_REDACTION ?? 'true').toLowerCase() !== 'false';
+
+type RedactResult =
+  | { ok: true; dataUrl: string; regions: number; width: number; height: number; inferenceMs: number }
+  | { ok: false; reason: string };
+
+/**
+ * Decode a base64 PNG/JPEG into RGBA.
+ *
+ * Hand-rolled rather than pulled from a dependency, and deliberately: the only
+ * formats the extension ever posts are PNG and JPEG screenshots, so this
+ * supports exactly those two and refuses anything else rather than pretending.
+ * A permissive "just try to decode it" path is how image handling ends up
+ * passing attacker-controlled bytes to something unexpected.
+ */
+function decodeImage(base64: string): { rgba: Uint8ClampedArray; width: number; height: number } | null {
+  let bytes: Uint8Array;
+  try {
+    const bin = atob(base64.replace(/\s/g, ''));
+    bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
+  } catch {
+    return null;
+  }
+
+  // PNG: 8-byte signature, then IHDR with width/height at fixed offsets.
+  const PNG_SIG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+  const isPng =
+    bytes.length > 24 && PNG_SIG.every((b, i) => bytes[i] === b);
+  if (isPng) {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const width = view.getUint32(16);
+    const height = view.getUint32(20);
+    const bitDepth = bytes[24];
+    const colorType = bytes[25];
+    if (bitDepth !== 8) return null;
+    if (colorType !== 6 && colorType !== 2) return null; // RGBA or RGB
+    if (width <= 0 || height <= 0 || width > 8000 || height > 8000) return null;
+
+    const idat = collectPngIdat(bytes);
+    if (!idat) return null;
+    // Node's zlib, not a hand-rolled inflate. PNG IDAT is a zlib stream, and
+    // zlib.inflateSync is both correct and auditable; a hand-written
+    // DEFLATE decoder in a privacy path is exactly the wrong place to be
+    // clever.
+    let raw: Buffer;
+    try {
+      raw = inflateSync(idat);
+    } catch {
+      return null;
+    }
+    const channels = colorType === 6 ? 4 : 3;
+    const stride = width * channels;
+    const out = new Uint8ClampedArray(width * height * 4);
+
+    // Reverse the per-scanline PNG filters.
+    for (let y = 0; y < height; y += 1) {
+      const filter = raw[y * (stride + 1)];
+      const line = raw.subarray(y * (stride + 1) + 1, (y + 1) * (stride + 1));
+      const prev = y > 0 ? raw.subarray((y - 1) * (stride + 1) + 1, y * (stride + 1)) : null;
+      const cur = out.subarray(y * stride, (y + 1) * stride);
+      for (let x = 0; x < stride; x += 1) {
+        const a = x >= channels ? cur[x - channels] : 0;
+        const b = prev ? prev[x] : 0;
+        const c = prev && x >= channels ? prev[x - channels] : 0;
+        let v = line[x];
+        if (filter === 1) v += a;
+        else if (filter === 2) v += b;
+        else if (filter === 3) v += (a + b) >> 1;
+        else if (filter === 4) {
+          const p = a + b - c;
+          const pa = Math.abs(p - a);
+          const pb = Math.abs(p - b);
+          const pc = Math.abs(p - c);
+          v += pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+        }
+        cur[x] = v & 0xff;
+      }
+      for (let x = 0; x < width; x += 1) {
+        const s = x * channels;
+        const d = (y * width + x) * 4;
+        out[d] = cur[s];
+        out[d + 1] = cur[s + 1];
+        out[d + 2] = cur[s + 2];
+        out[d + 3] = channels === 4 ? cur[s + 3] : 255;
+      }
+    }
+    return { rgba: out, width, height };
+  }
+
+  // JPEG: baseline SOF0/SOF2 carry the frame size.
+  const jpeg = decodeJpegSize(bytes);
+  if (!jpeg) return null;
+  return { rgba: null as unknown as Uint8ClampedArray, width: jpeg.width, height: jpeg.height };
+}
+
+function collectPngIdat(bytes: Uint8Array): Uint8Array | null {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const parts: Uint8Array[] = [];
+  let offset = 8;
+  while (offset + 8 <= bytes.length) {
+    const length = view.getUint32(offset);
+    const type = String.fromCharCode(bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7]);
+    if (type === 'IDAT') parts.push(bytes.subarray(offset + 8, offset + 8 + length));
+    if (type === 'IEND') break;
+    offset += 12 + length;
+  }
+  if (parts.length === 0) return null;
+  const total = parts.reduce((a, p) => a + p.length, 0);
+  const joined = new Uint8Array(total);
+  let at = 0;
+  for (const p of parts) {
+    joined.set(p, at);
+    at += p.length;
+  }
+  return joined;
+}
+
+/** Frame dimensions from a JPEG SOFn marker. */
+function decodeJpegSize(bytes: Uint8Array): { width: number; height: number } | null {
+  let offset = 2;
+  while (offset + 4 < bytes.length) {
+    if (bytes[offset] !== 0xff) {
+      offset += 1;
+      continue;
+    }
+    const marker = bytes[offset + 1];
+    const length = (bytes[offset + 2] << 8) | bytes[offset + 3];
+    // SOF0..SOF15, excluding DHT(c4), JPGA(c8) and DAC(cc)
+    if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+      const height = (bytes[offset + 5] << 8) | bytes[offset + 6];
+      const width = (bytes[offset + 7] << 8) | bytes[offset + 8];
+      if (width > 0 && height > 0) return { width, height };
+    }
+    offset += 2 + length;
+  }
+  return null;
+}
+
+/** CRC-32, as PNG chunks require. */
+const CRC_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let n = 0; n < 256; n += 1) {
+    let c = n;
+    for (let k = 0; k < 8; k += 1) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    table[n] = c >>> 0;
+  }
+  return table;
+})();
+
+function crc32(buf: Uint8Array): number {
+  let c = 0xffffffff;
+  for (let i = 0; i < buf.length; i += 1) c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+function pngChunk(type: string, data: Uint8Array): Uint8Array {
+  const out = new Uint8Array(12 + data.length);
+  const view = new DataView(out.buffer);
+  view.setUint32(0, data.length);
+  for (let i = 0; i < 4; i += 1) out[4 + i] = type.charCodeAt(i);
+  out.set(data, 8);
+  const crcInput = out.subarray(4, 8 + data.length);
+  view.setUint32(8 + data.length, crc32(crcInput));
+  return out;
+}
+
+/**
+ * Re-encode RGBA as a PNG data URL.
+ *
+ * Filter type 0 (none) on every scanline: the frames are screenshots, so the
+ * size cost is acceptable, and "none" is the one filter that cannot be subtly
+ * wrong. Producing a corrupt PNG here would mean the model receives garbage
+ * while the log says the frame was masked.
+ */
+function encodePng(rgba: Uint8ClampedArray, width: number, height: number): string {
+  const stride = width * 4;
+  const rawWithFilters = new Uint8Array(height * (stride + 1));
+  for (let y = 0; y < height; y += 1) {
+    rawWithFilters[y * (stride + 1)] = 0; // filter: none
+    rawWithFilters.set(rgba.subarray(y * stride, (y + 1) * stride), y * (stride + 1) + 1);
+  }
+
+  const ihdr = new Uint8Array(13);
+  const view = new DataView(ihdr.buffer);
+  view.setUint32(0, width);
+  view.setUint32(4, height);
+  ihdr[8] = 8; // bit depth
+  ihdr[9] = 6; // colour type RGBA
+  ihdr[10] = 0; // deflate
+  ihdr[11] = 0; // adaptive filtering
+  ihdr[12] = 0; // no interlace
+
+  const parts = [
+    new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk('IHDR', ihdr),
+    pngChunk('IDAT', new Uint8Array(deflateSync(rawWithFilters))),
+    pngChunk('IEND', new Uint8Array(0)),
+  ];
+
+  const total = parts.reduce((a, p) => a + p.length, 0);
+  const png = new Uint8Array(total);
+  let at = 0;
+  for (const p of parts) {
+    png.set(p, at);
+    at += p.length;
+  }
+
+  let binary = '';
+  for (let i = 0; i < png.length; i += 1) binary += String.fromCharCode(png[i]);
+  return `data:image/png;base64,${btoa(binary)}`;
+}
+
+/**
+ * Mask one base64 image on the server and return a data URL.
+ *
+ * A JPEG cannot be re-encoded here without a codec, so this returns a clear
+ * failure for JPEG rather than silently forwarding it unmasked. The extension
+ * captures with `format: 'png'`, so PNG is the path that actually runs; JPEG
+ * is refused loudly, and REJECT_UNREDACTED decides what happens next.
+ */
+async function redactOnServer(base64: string): Promise<RedactResult> {
+  const decoded = decodeImage(base64);
+  if (!decoded) {
+    return { ok: false, reason: 'image is neither a supported PNG nor a readable JPEG' };
+  }
+  if (!decoded.rgba) {
+    return {
+      ok: false,
+      reason:
+        `JPEG input (${decoded.width}x${decoded.height}) cannot be re-encoded server-side; ` +
+        'captures must be PNG for server-side masking to apply',
+    };
+  }
+
+  const detection = await detectSensitiveRegions(decoded.rgba, decoded.width, decoded.height);
+  if (!detection.ok) return { ok: false, reason: detection.reason };
+
+  const painted = applyRedaction(decoded.rgba, decoded.width, decoded.height, detection.regions);
+  if (painted === 0) {
+    // Distinguish "nothing to mask" from "masking failed". A frame with no
+    // form fields is legitimately clean; reporting that as success is correct,
+    // and the count is logged either way.
+    return {
+      ok: true,
+      dataUrl: '',
+      regions: 0,
+      width: decoded.width,
+      height: decoded.height,
+      inferenceMs: detection.inferenceMs,
+    };
+  }
+
+  return {
+    ok: true,
+    dataUrl: encodePng(decoded.rgba, decoded.width, decoded.height),
+    regions: painted,
+    width: decoded.width,
+    height: decoded.height,
+    inferenceMs: detection.inferenceMs,
+  };
+}
 
 const app = new Hono();
 
@@ -1290,6 +1568,47 @@ app.post('/api/step', async (c) => {
   // Log payload sizes
   log.info(`Step ${step} [${sessionId}] — task: ${task.length} chars, maskedDom: ${maskedDom.length} chars, redactedImage: ${imageBase64.length} chars, rawImage: ${typeof rawImage === 'string' ? rawImage.length : 0} chars, history: ${actionHistory.length} items`);
 
+  // ── Server-side redaction ────────────────────────────────────────────────
+  // The extension's own redaction cannot run: its models are dynamically
+  // quantized and need `DynamicQuantizeLinear`, an operator present in no
+  // onnxruntime-web build, and the WASM backend cannot initialise in an MV3
+  // service worker at all. The frames arrive here regardless, so this is where
+  // masking happens.
+  //
+  // This does NOT change what leaves the browser — the raw frame was already
+  // being posted to this loopback server. It changes WHERE the mask is
+  // applied, and it makes the server the authority: the client's redaction
+  // envelope is a claim, and this is the verification.
+  let vlmImageForUpstream = finalVlmImage;
+  if (SERVER_REDACTION && rawImage) {
+    const masked = await redactOnServer(rawImage);
+    if (masked.ok) {
+      // An empty dataUrl means the detector found nothing to mask, which is a
+      // legitimate clean frame — keep the original rather than sending "".
+      if (masked.dataUrl) vlmImageForUpstream = masked.dataUrl;
+      log.info(
+        `Server redaction masked ${masked.regions} region(s) over ${masked.width}x${masked.height} ` +
+        `in ${masked.inferenceMs}ms — this frame is now provably redacted, not merely claimed to be`,
+      );
+    } else {
+      log.error(
+        `Server redaction FAILED (${masked.reason}). REJECT_UNREDACTED is ` +
+        `${REJECT_UNREDACTED ? 'ON, so this step is refused rather than sent' : 'off, so this step proceeds UNMASKED'}.`,
+      );
+      if (REJECT_UNREDACTED) {
+        return c.json(
+          {
+            error: 'REDACTION_UNAVAILABLE',
+            detail:
+              'This server could not verify redaction, and REJECT_UNREDACTED is enabled. ' +
+              'Refusing to forward an unmasked frame to a model provider.',
+          },
+          503,
+        );
+      }
+    }
+  }
+
   // Phase 3: the model reply is now schema-validated, exactly as the request
   // already was. The previous implementation stripped markdown fences,
   // searched for the first '{' and last '}', removed trailing commas, and
@@ -1399,7 +1718,7 @@ app.post('/api/step', async (c) => {
         subTasks,
         rawImage: typeof rawImage === 'string' ? rawImage : undefined,
         maskedImage: imageBase64,
-        vlmImage: finalVlmImage,
+        vlmImage: vlmImageForUpstream,
         vlmModel: 'workflow-gate-shortcircuit',
         promptContext: 'Workflow completion gate short-circuited upstream VLM call.',
         vlmResponse: JSON.stringify(doneResponse),
@@ -1481,16 +1800,53 @@ app.post('/api/step', async (c) => {
   // what the bytes actually were, so a PNG frame from a client was forwarded
   // mislabelled. The MIME subtype is now derived from the magic bytes, and a
   // declared/actual mismatch is refused rather than silently forwarded.
-  if (imageBase64.trim().length > 50) {
-    const declaredMime = 'image/jpeg';
-    const imageCheck = validateImagePayload(imageBase64, declaredMime);
+  //
+  // Server-side redaction changes WHICH bytes go here.
+  //
+  const outboundIsMasked = Boolean(vlmImageForUpstream) && vlmImageForUpstream !== finalVlmImage;
+  // Invariant preserved from before this change, and it is a load-bearing one:
+  // outbound content is a function of the MASKED image only. If masking
+  // produced nothing — no regions, or a frame it could not decode — then
+  // NOTHING is attached. Falling back to the client's raw bytes here would
+  // silently undo the entire control, and it would look like success in the
+  // log. This is what tests/security/egressRawOnly.test.ts pins.
+  const outboundImage = outboundIsMasked ? (vlmImageForUpstream as string) : imageBase64;
+
+  if (outboundImage.trim().length > 50) {
+    // A masked frame is a PNG this server just encoded, so its type is known
+    // and the declared label must match it. An unmasked client frame keeps the
+    // original magic-byte validation.
+    const declaredMime = outboundIsMasked ? 'image/png' : 'image/jpeg';
+    const imageCheck = validateImagePayload(outboundImage, declaredMime);
     if (!imageCheck.ok) {
       log.warn(`[Image safety] Refusing outbound frame for ${sessionId}: ${imageCheck.error}`);
+      if (outboundIsMasked) {
+        // A mask we produced was rejected. Forwarding the raw frame instead
+        // would defeat the point of masking at all.
+        log.error(
+          `[Image safety] Server-masked frame for ${sessionId} failed validation ` +
+          `(${imageCheck.error}); refusing rather than falling back to the raw frame.`,
+        );
+        if (REJECT_UNREDACTED) {
+          return c.json({ error: 'REDACTED_FRAME_REJECTED', detail: imageCheck.error }, 503);
+        }
+      }
     } else {
+      // A server-masked frame is ALREADY a full data URL (encodePng builds
+      // one). Prepending the prefix again produced
+      // "data:image/png;base64,data:image/png;base64,..." — a double-encoded
+      // URL that no decoder can read, so the provider would have received a
+      // broken image while the log said it was masked.
+      const outboundUrl = outboundIsMasked
+        ? outboundImage
+        : `data:image/${imageCheck.format};base64,` + outboundImage;
       userContent.push({
         type: 'image_url',
-        image_url: { url: `data:image/${imageCheck.format};base64,` + imageBase64 },
+        image_url: { url: outboundUrl },
       });
+      if (outboundIsMasked) {
+        log.info(`[Redaction] Provider frame for ${sessionId} is the SERVER-MASKED image.`);
+      }
     }
   }
 
@@ -1793,7 +2149,7 @@ app.post('/api/step', async (c) => {
     subTasks,
     rawImage: typeof rawImage === 'string' ? rawImage : undefined,
     maskedImage: imageBase64,
-    vlmImage: finalVlmImage,
+    vlmImage: vlmImageForUpstream,
     vlmModel: hasGemini ? (process.env.GEMINI_MODEL || 'gemini-2.5-flash') : (process.env.MODEL_NAME || '9router-fallback'),
     promptContext: userContent[0]?.type === 'text' ? userContent[0].text : undefined,
     vlmResponse: rawVlmResponse,
@@ -2025,6 +2381,16 @@ if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
   log.info(`  Payload limit:     ${limitLabel}`);
   log.info(`  Upstream timeout:  35s`);
   log.info(`  Session Vault:     storage/sessions/<sessionId>/`);
+  // Stated plainly, because it is now the single most important line in the
+  // banner: this server is where masking happens, and whether it can do it.
+  log.info(
+    `  Server Redaction:  ${
+      SERVER_REDACTION
+        ? 'ENABLED — frames are masked here; this server is the authority'
+        : 'DISABLED — frames reach the provider UNMASKED'
+    }`,
+  );
+  log.info(`                     ${await describeRedactionCapability()}`);
 
   // ── PAIRING ──────────────────────────────────────────────────────
   // Without this the extension cannot be paired AT ALL on the default path:
