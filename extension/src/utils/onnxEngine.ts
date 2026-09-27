@@ -11,7 +11,7 @@
  * All model fetches use browser.runtime.getURL(...) — never remote CDNs.
  */
 import { browser } from 'wxt/browser';
-import * as ort from 'onnxruntime-web';
+import * as ort from 'onnxruntime-web/all';
 import { computeIoU, nms } from './nms';
 import { imageDataToNCHW } from './tensor';
 import { detectHardwareTier } from './hardwareTier';
@@ -301,5 +301,61 @@ export async function checkModelAvailability(): Promise<boolean> {
   } catch (error) {
     console.error('[onnxEngine] Availability check failed:', error instanceof Error ? error.message : error);
     return false;
+  }
+}
+
+/**
+ * Prove the model can ACTUALLY BE LOADED, not merely that its file is
+ * fetchable.
+ *
+ * The byte-range check above only proves the .onnx is present. It says nothing
+ * about whether the ONNX Runtime WASM can initialise in this environment — and
+ * that is the part which was silently broken: the runtime was unreachable, the
+ * models were absent from the bundle, and the byte-range check still reported
+ * "available: true" for all three. The UI therefore showed a healthy agent
+ * while redaction was not running.
+ *
+ * This creates a real InferenceSession, which is the operation that failed
+ * before, and therefore the only honest test. Bounded, because an unbounded
+ * session create would hang the service worker with no way to report.
+ */
+export async function checkModelRuntimeUsable(timeoutMs = 30_000): Promise<boolean> {
+  // The bound is real: a create that never settles must not park the service
+  // worker with no way to report, which is itself a silent-failure mode.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expiry = new Promise<'timeout'>((resolve) => {
+    timer = setTimeout(() => resolve('timeout'), timeoutMs);
+  });
+  try {
+    const outcome = await Promise.race([
+      ort.InferenceSession.create(MODEL_URL, {
+        executionProviders: ['wasm'],
+        graphOptimizationLevel: 'disabled',
+      }).then((session) => ({ kind: 'ok' as const, session })),
+      expiry,
+    ]);
+
+    if (outcome === 'timeout') {
+      logSessionResult('runtime-probe', false, `timed out after ${timeoutMs}ms`);
+      return false;
+    }
+    const ok = Boolean(outcome.session);
+    logSessionResult('runtime-probe', ok, null);
+    return ok;
+  } catch (error) {
+    logSessionResult('runtime-probe', false, error);
+    return false;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function logSessionResult(tag: string, ok: boolean, error: unknown): void {
+  if (ok) {
+    console.log(`[onnxEngine] ${tag}: session created — the runtime is usable.`);
+  } else {
+    console.error(
+      `[onnxEngine] ${tag}: session creation FAILED: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 }

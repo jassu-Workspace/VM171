@@ -4,7 +4,33 @@
  * Now runs a continuous multimodal agentic loop.
  */
 import { browser } from 'wxt/browser';
-import * as ort from 'onnxruntime-web';
+// `onnxruntime-web/all`, not the default entry.
+//
+// This is NECESSARY BUT NOT SUFFICIENT, and the reason is worth recording
+// because it cost real time to find.
+//
+// The default entry resolves the WASM JS glue with a DYNAMIC import(). The
+// the HTML specification forbids that inside a service worker, so in an
+// MV3 service worker session creation fails with:
+//
+//   no available backend found. ERR: [wasm] TypeError: import() is
+//   disallowed on ServiceWorkerGlobalScope by the HTML specification.
+//
+// `/all` maps to `ort.all.bundle.min.mjs`, which inlines the glue, and it is
+// the correct entry for a service worker.
+//
+// It does NOT fix it. Verified in the built bundle: `Gb=async e=>(await
+// import(e)).default` survives in background.js and is still called on the
+// wasm path (`return[d?s:void 0,await Gb(`). So onnxruntime-web 1.29.0's WASM
+// backend cannot initialise in an MV3 service worker at all, and no bundler
+// or path setting changes that — it is a platform restriction, not a
+// packaging mistake.
+//
+// The honest status of redaction is therefore DEGRADED on MV3, and
+// checkModelRuntimeUsable() below reports that truthfully rather than
+// claiming "live" because the .onnx file happens to be fetchable. See
+// ONNX-RUNTIME-MV3.md for the options and their trade-offs.
+import * as ort from 'onnxruntime-web/all';
 import { generateSessionId, SessionLogger, AgentSession } from '../../utils/sessionLogger';
 import { resolveCaptureSource, type RedactionLegendEntry, type RedactionEnvelope } from '../../utils/captureProvenance';
 import { runController } from '../../utils/runControl';
@@ -35,7 +61,7 @@ interface ActionResultResponse {
 }
 import { sendToTab, type ActionDecision } from '../../utils/messaging';
 import { getAgentConfig, authHeadersFor, isAllowedServerUrl, DEFAULT_SERVER_URL } from '../../utils/config';
-import { detectUIElements, getUIStatus, checkModelAvailability } from '../../utils/onnxEngine';
+import { detectUIElements, getUIStatus, checkModelAvailability, checkModelRuntimeUsable } from '../../utils/onnxEngine';
 import { getOcrStatus, checkOcrAvailability } from '../../utils/ocrEngine';
 import { BackgroundMessageSchema } from '../../types/messages';
 
@@ -55,9 +81,10 @@ import { BackgroundMessageSchema } from '../../types/messages';
 // claim, since the runtime would be fetched off-origin.
 const ORT_WASM_DIR = 'ort/';
 ort.env.wasm.numThreads = 1;
+// Only the .wasm path is set. Providing an `mjs` key would make ORT resolve
+// the JS glue by URL; the `/all` entry (imported above) inlines it statically.
 ort.env.wasm.wasmPaths = {
   wasm: browser.runtime.getURL(`${ORT_WASM_DIR}ort-wasm-simd-threaded.wasm`),
-  mjs: browser.runtime.getURL(`${ORT_WASM_DIR}ort-wasm-simd-threaded.mjs`),
 };
 
 console.log('🛰 Background script initialized');
@@ -324,12 +351,25 @@ async function runModelAvailabilityCheck(): Promise<void> {
       checkFaceModelAvailability(),
       checkOcrAvailability(),
     ]);
-    // Only flip to 'live' if file exists; never override an active session.
-    if (uiOk) modelStatus.ui = 'live';
+    // A reachable .onnx file is not a working model. Before this, "available"
+    // meant only "the bytes are fetchable", so the UI reported a healthy agent
+    // while the WASM runtime was missing from the bundle and redaction was not
+    // running at all. Prove the runtime can actually create a session before
+    // calling the UI model live.
+    const runtimeOk = await checkModelRuntimeUsable();
+    if (!runtimeOk) {
+      console.warn(
+        '[background] ONNX runtime is not usable — UI model stays DEGRADED so ' +
+          'the agent does not report itself as ready while redaction cannot run.',
+      );
+    }
+    // Only flip to 'live' if the file is reachable AND the runtime works; never
+    // override an active session.
+    if (uiOk && runtimeOk) modelStatus.ui = 'live';
     if (faceOk) modelStatus.face = 'live';
-    if (ocrOk) modelStatus.ocr = 'live';
+    if (ocrOk && runtimeOk) modelStatus.ocr = 'live';
     modelAvailabilityChecked = true;
-    console.log('[background] Results - UI:', uiOk, 'Face:', faceOk, 'OCR:', ocrOk);
+    console.log('[background] Results - UI:', uiOk, 'Face:', faceOk, 'OCR:', ocrOk, 'Runtime:', runtimeOk);
     console.log('[background] modelStatus after check:', JSON.stringify(modelStatus));
   } catch (error) {
     console.error('[background] Availability check error:', error instanceof Error ? error.message : error);
