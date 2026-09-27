@@ -163,6 +163,13 @@ export const ConfirmationResolvedMessageSchema = z
   })
   .strict();
 
+/** Ask whether a run is currently active. Read-only — starts nothing. */
+export const GetRunStatusMessageSchema = z
+  .object({
+    type: z.literal('GET_RUN_STATUS'),
+  })
+  .strict();
+
 export const BackgroundMessageSchema = z.discriminatedUnion('type', [
   // The request/response pair that was MISSING: a sidepanel that cannot be
   // told to prompt, and a reply the background cannot receive, together made
@@ -177,6 +184,7 @@ export const BackgroundMessageSchema = z.discriminatedUnion('type', [
   // broadcast and the answer is a separate message, which is what the two
   // halves actually need.
   ConfirmResponseMessageSchema,
+  GetRunStatusMessageSchema,
   GetTelemetryMessageSchema,
   GetModelStatusMessageSchema,
   CaptureTabMessageSchema,

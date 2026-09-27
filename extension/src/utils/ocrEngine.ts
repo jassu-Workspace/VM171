@@ -11,7 +11,7 @@
  * All model fetches use browser.runtime.getURL(...) — never remote CDNs.
  */
 import { browser } from 'wxt/browser';
-import * as ort from 'onnxruntime-web/all';
+import * as ort from 'onnxruntime-web/webgl';
 import { ctcGreedyDecode, loadOcrDict } from './ctc';
 import { dbPostProcess, Quad } from './dbPostProcess';
 import { detectHardwareTier } from './hardwareTier';

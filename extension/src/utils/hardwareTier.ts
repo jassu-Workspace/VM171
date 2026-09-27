@@ -18,7 +18,19 @@ export interface HardwareProfile {
   hasWebGPU: boolean;
   cores: number;
   memoryGB: number;
-  executionProviders: Array<'webgpu' | 'wasm'>;
+  /**
+   * `webgl` is the provider that actually WORKS here, and it is always first.
+   *
+   * onnxruntime-web's WASM backend cannot initialise in an MV3 service worker:
+   * its glue is loaded with a dynamic import(), which the HTML spec forbids
+   * there. The `webgl` build has no dynamic imports and does initialise, so it
+   * is the only viable backend for the models that must run locally.
+   *
+   * `wasm` is kept as a trailing fallback for the non-MV3 paths and for future
+   * runtimes, but it must never be first — asking for it first makes session
+   * creation fail outright rather than degrading.
+   */
+  executionProviders: Array<'webgpu' | 'webgl' | 'wasm'>;
   numThreads: number;
   label: string;
   badge: string;
@@ -39,7 +51,7 @@ export function classifyHardwareTier(
       hasWebGPU: true,
       cores,
       memoryGB,
-      executionProviders: ['webgpu', 'wasm'],
+      executionProviders: ['webgpu', 'webgl', 'wasm'],
       numThreads: Math.min(4, Math.max(1, cores - 1)),
       label: 'Tier 1: High-Capacity Workstation (WebGPU Active)',
       badge: 'TIER 1 (WebGPU)',
@@ -52,7 +64,7 @@ export function classifyHardwareTier(
       hasWebGPU,
       cores,
       memoryGB,
-      executionProviders: hasWebGPU ? ['webgpu', 'wasm'] : ['wasm'],
+      executionProviders: hasWebGPU ? ['webgpu', 'webgl', 'wasm'] : ['webgl', 'wasm'],
       numThreads: Math.min(4, Math.max(1, cores - 1)),
       label: 'Tier 2: Standard Balanced (WASM Multi-Thread)',
       badge: hasWebGPU ? 'TIER 2 (WebGPU Hybrid)' : 'TIER 2 (WASM SIMD)',
@@ -64,7 +76,7 @@ export function classifyHardwareTier(
     hasWebGPU: false,
     cores,
     memoryGB,
-    executionProviders: ['wasm'],
+    executionProviders: ['webgl', 'wasm'],
     numThreads: 1, // Single-threaded for low-spec stability
     label: 'Tier 3: Resource-Constrained (WASM Lite Single-Thread)',
     badge: 'TIER 3 (WASM Lite)',

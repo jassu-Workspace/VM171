@@ -87,7 +87,17 @@ let script: string[] = [];
  * When set, the next /chat/completions response waits on this before it is
  * written. Lets a test hold an agent run open so an overlap is deterministic.
  */
-let holdUntil: { promise: Promise<void>; release: () => void } | null = null;
+let holdGate: { armed: boolean; wait: Promise<void> } | null = null;
+
+/**
+ * An extension page used for all runtime messaging from tests.
+ *
+ * Module scope, not local to a test: an MV3 service worker does not receive its
+ * own runtime.sendMessage, so every message a test sends must originate from a
+ * page. The teardown in afterEach needs it too, and that runs after each test
+ * body has returned.
+ */
+let control: import('playwright').Page | null = null;
 
 function readBody(req: import('node:http').IncomingMessage): Promise<string> {
   return new Promise((resolve) => {
@@ -132,10 +142,8 @@ beforeAll(async () => {
     // START_AGENT is even dispatched, and the guard under test never gets a
     // chance to fire. Holding the first completion open makes the overlap
     // deterministic instead of a race against a fast loop.
-    if (holdUntil) {
-      const gate = holdUntil;
-      holdUntil = null;
-      await gate.promise;
+    if (holdGate?.armed) {
+      await holdGate.wait;
     }
 
     res.writeHead(200, { 'content-type': 'application/json' });
@@ -313,22 +321,43 @@ afterAll(async () => {
 afterEach(async () => {
   // Release any hold first, or the parked completion never resolves and the
   // run cannot unwind.
-  holdUntil = null;
+  if (holdGate) holdGate.armed = false;
+  holdGate = null;
   // STOP_AGENT only REQUESTS a stop (it calls requestStop and returns), so it
-  // is not synchronous — the worker needs a turn of the event loop to unwind
-  // and clear runController.
+  // is not synchronous.
   //
-  // An earlier version of this polled by sending a probe START_AGENT until it
-  // was accepted. That was self-defeating: on a CLEAR guard the probe STARTS a
-  // real run, which then has to be stopped by another non-synchronous
-  // STOP_AGENT, so the poll manufactured the very race it was checking for and
-  // handed a stale run to the next test. Never probe with the message whose
-  // guard is under test.
-  await worker
+  // An earlier version polled by sending a probe START_AGENT until it was
+  // accepted. That was self-defeating: on a CLEAR guard the probe STARTS a
+  // real run, which then needs another non-synchronous STOP_AGENT, so the poll
+  // manufactured the very race it was checking for and handed a stale run to
+  // the next test. Never probe with the message whose guard is under test.
+  if (!control) return;
+  await control
     .evaluate(() => chrome.runtime.sendMessage({ type: 'STOP_AGENT' }))
     .catch(() => {});
-  // Let the worker's teardown run to completion.
-  await new Promise((r) => setTimeout(r, 500));
+
+  // Wait on the READ-ONLY status instead. GET_RUN_STATUS starts nothing, so
+  // this can observe the run slot settling without perturbing it.
+  //
+  // It must be sent from an extension PAGE, not the service worker: an MV3
+  // worker does not receive its own runtime.sendMessage, so sending from there
+  // throws "Receiving end does not exist", the catch treats that as "idle",
+  // and the teardown returns immediately while the previous run is still
+  // active. That is exactly the leak this was meant to prevent.
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const busy = await control
+      .evaluate(async () => {
+        const res = await chrome.runtime.sendMessage({ type: 'GET_RUN_STATUS' });
+        return (res as { isRunning?: boolean } | undefined)?.isRunning === true;
+      })
+      .catch(() => true); // unreadable status is NOT evidence of idle
+    if (!busy) return;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  throw new Error(
+    'teardown: a run was still active 10s after STOP_AGENT — the run slot did not clear',
+  );
 });
 
 /** Pair the extension with the server, exactly as the Options page would. */
@@ -392,8 +421,12 @@ describe('E2E — the real agent loop, content script to AI and back', () => {
     expect(extId, 'the built extension id must match the id pinned in the manifest key').toBe(
       'fidbnhfgcadfpjlmdfpnngikjpdhcdcf',
     );
-    const control = await ctx.newPage();
-    await control.goto(`chrome-extension://${extId}/popup.html`);
+    // Reuse the shared control page so afterEach can also message the worker.
+    if (!control) {
+      control = await ctx.newPage();
+      await control.goto(`chrome-extension://${extId}/popup.html`);
+      await control.waitForLoadState('domcontentloaded');
+    }
 
     // Resolve the FIXTURE tab by url. "active tab in current window" is the
     // control page we just opened, so asking for it drove the agent at the
@@ -527,8 +560,12 @@ describe('E2E — the real agent loop, content script to AI and back', () => {
     // scratchpad, the telemetry and — worst — the DOM, interleaving clicks in
     // one page. This is the regression that guard exists to prevent.
     const extId = new URL(worker.url()).host;
-    const control = await ctx.newPage();
-    await control.goto(`chrome-extension://${extId}/popup.html`);
+    // Reuse the shared control page so afterEach can also message the worker.
+    if (!control) {
+      control = await ctx.newPage();
+      await control.goto(`chrome-extension://${extId}/popup.html`);
+      await control.waitForLoadState('domcontentloaded');
+    }
 
     const page = await ctx.newPage();
     await page.goto(`http://127.0.0.1:${AI_PORT}/fixture`);
@@ -543,13 +580,18 @@ describe('E2E — the real agent loop, content script to AI and back', () => {
     // the second START_AGENT arrives. Otherwise the mock answers instantly, the
     // first run completes, and the guard being tested never gets exercised —
     // the test then fails for a reason that has nothing to do with the guard.
+    //
+    // The hold must survive REPEATED calls, not just the first. The agent loop
+    // asks the provider once per step; a single-use hold is consumed by step 1,
+    // step 2 then gets an immediate answer, the run finishes, and the guard has
+    // nothing left to refuse. So the hold is a GATE the mock re-enters on every
+    // call while armed, and `releaseHold` lets it out.
     let releaseHold = () => {};
-    holdUntil = {
-      promise: new Promise<void>((r) => { releaseHold = r; }),
-      release: () => {},
+    holdGate = {
+      armed: true,
+      wait: new Promise<void>((r) => { releaseHold = r; }),
     };
     script = [JSON.stringify({ action: 'click', selector: '#target', thought: 'Working.' })];
-    // The first run is now parked inside the mock awaiting releaseHold.
 
     const first = await control.evaluate(
       async ([task, tab]) =>
@@ -557,6 +599,22 @@ describe('E2E — the real agent loop, content script to AI and back', () => {
       ['Long running task', tabId] as [string, number],
     );
     expect(first).toMatchObject({ success: true });
+
+    // Wait until the run is actually OCCUPYING the slot before challenging the
+    // guard. START_AGENT acknowledges before the loop body starts, so sending
+    // the second request immediately races the run's own registration — and a
+    // race is a coin flip, which is why this test was intermittently passing.
+    // GET_RUN_STATUS is read-only, so waiting on it cannot perturb what is
+    // being measured.
+    await control.waitForFunction(
+      async () => {
+        const res = await chrome.runtime.sendMessage({ type: 'GET_RUN_STATUS' });
+        return (res as { isRunning?: boolean } | undefined)?.isRunning === true;
+      },
+      undefined,
+      { timeout: 15_000 },
+    );
+
     const second = await control.evaluate(
       async ([task, tab]) =>
         chrome.runtime.sendMessage({ type: 'START_AGENT', payload: task, targetTabId: tab }),
@@ -566,8 +624,10 @@ describe('E2E — the real agent loop, content script to AI and back', () => {
     expect(String((second as any).error ?? '')).toMatch(/already in progress/i);
 
     // Let the held run finish so it cannot leak into later assertions.
+    // Disarm BEFORE releasing so no further provider call re-enters the gate.
+    if (holdGate) holdGate.armed = false;
+    holdGate = null;
     releaseHold();
-    holdUntil = null;
 
     // Clean up so the run does not leak into later assertions.
     await control.evaluate(() => chrome.runtime.sendMessage({ type: 'STOP_AGENT' })).catch(() => {});

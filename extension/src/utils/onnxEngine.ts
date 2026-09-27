@@ -11,7 +11,7 @@
  * All model fetches use browser.runtime.getURL(...) — never remote CDNs.
  */
 import { browser } from 'wxt/browser';
-import * as ort from 'onnxruntime-web/all';
+import * as ort from 'onnxruntime-web/webgl';
 import { computeIoU, nms } from './nms';
 import { imageDataToNCHW } from './tensor';
 import { detectHardwareTier } from './hardwareTier';
@@ -327,9 +327,12 @@ export async function checkModelRuntimeUsable(timeoutMs = 30_000): Promise<boole
     timer = setTimeout(() => resolve('timeout'), timeoutMs);
   });
   try {
+    // detectHardwareTier is async, and provider order matters: asking for wasm
+    // first guarantees failure in a service worker regardless of webgl.
+    const profile = await detectHardwareTier();
     const outcome = await Promise.race([
       ort.InferenceSession.create(MODEL_URL, {
-        executionProviders: ['wasm'],
+        executionProviders: profile.executionProviders,
         graphOptimizationLevel: 'disabled',
       }).then((session) => ({ kind: 'ok' as const, session })),
       expiry,

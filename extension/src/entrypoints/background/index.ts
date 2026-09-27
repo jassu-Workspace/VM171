@@ -4,33 +4,28 @@
  * Now runs a continuous multimodal agentic loop.
  */
 import { browser } from 'wxt/browser';
-// `onnxruntime-web/all`, not the default entry.
+// `onnxruntime-web/webgl`, and the reason is a hard platform restriction.
 //
-// This is NECESSARY BUT NOT SUFFICIENT, and the reason is worth recording
-// because it cost real time to find.
-//
-// The default entry resolves the WASM JS glue with a DYNAMIC import(). The
-// the HTML specification forbids that inside a service worker, so in an
-// MV3 service worker session creation fails with:
+// The default and `/all` entries resolve the WASM JavaScript glue with a
+// DYNAMIC import(). The HTML specification forbids that inside a service
+// worker, so session creation fails with:
 //
 //   no available backend found. ERR: [wasm] TypeError: import() is
-//   disallowed on ServiceWorkerGlobalScope by the HTML specification.
+//   disallowed in a service worker by the HTML specification.
 //
-// `/all` maps to `ort.all.bundle.min.mjs`, which inlines the glue, and it is
-// the correct entry for a service worker.
+// Verified in the built bundle rather than assumed: the loader
+// (`async e=>(await import(e)).default`) survives in background.js and is
+// still called on the wasm path. No bundler or wasmPaths setting removes it.
 //
-// It does NOT fix it. Verified in the built bundle: `Gb=async e=>(await
-// import(e)).default` survives in background.js and is still called on the
-// wasm path (`return[d?s:void 0,await Gb(`). So onnxruntime-web 1.29.0's WASM
-// backend cannot initialise in an MV3 service worker at all, and no bundler
-// or path setting changes that — it is a platform restriction, not a
-// packaging mistake.
+// `ort.webgl.min.mjs` is the only ORT build with ZERO dynamic imports, and it
+// exports the same InferenceSession API. WebGL is available in an MV3 service
+// worker, so this actually initialises. Verified in real Chromium via
+// tests/e2e/modelLoad.check.ts.
 //
-// The honest status of redaction is therefore DEGRADED on MV3, and
-// checkModelRuntimeUsable() below reports that truthfully rather than
-// claiming "live" because the .onnx file happens to be fetchable. See
-// ONNX-RUNTIME-MV3.md for the options and their trade-offs.
-import * as ort from 'onnxruntime-web/all';
+// Cost: WebGL rather than the WASM CPU backend. Slower per-inference on some
+// GPUs, and it needs a WebGL context. numThreads is irrelevant here, so the
+// SharedArrayBuffer constraint no longer applies.
+import * as ort from 'onnxruntime-web/webgl';
 import { generateSessionId, SessionLogger, AgentSession } from '../../utils/sessionLogger';
 import { resolveCaptureSource, type RedactionLegendEntry, type RedactionEnvelope } from '../../utils/captureProvenance';
 import { runController } from '../../utils/runControl';
@@ -2102,6 +2097,18 @@ export default defineBackground(() => {
       return false;
     }
     const message = parsed.data;
+
+    // A read-only view of the run slot.
+    //
+    // Without this there is no way to ask "is a run still active?" — the only
+    // message that reveals it is START_AGENT, and sending that to find out
+    // STARTS a run. That is what made the E2E concurrency test unable to
+    // isolate itself: it could only poll by side effect, and a side-effecting
+    // poll hands the next test a run it did not start.
+    if (message.type === 'GET_RUN_STATUS') {
+      sendResponse({ isRunning: runController.isActive() });
+      return false;
+    }
 
     // The operator's answer to a confirmation prompt. This is the message that
     // was missing: without a handler here, a gated action could only ever time
